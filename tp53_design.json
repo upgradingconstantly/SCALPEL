@@ -1,0 +1,103 @@
+{
+  "status": "success",
+  "target": {
+    "gene": "TP53",
+    "gene_id": "ENSG00000141510",
+    "chromosome": "chr17",
+    "start": 7675052,
+    "end": 7676594,
+    "strand": "-",
+    "genome": "GRCh38",
+    "modality": "knockout",
+    "cas_variant": "SpCas9",
+    "sequence_length": 1542,
+    "transcript_id": "ENST00000269305",
+    "is_mane_select": true,
+    "n_exons": 11
+  },
+  "n_guides_requested": 3,
+  "n_guides_found": 184,
+  "guides": [
+    {
+      "rank": 1,
+      "spacer_sequence": "GTCGCATATCCTGGCCACTG",
+      "pam_sequence": "AGG",
+      "strand": "+",
+      "genomic_start": 7675394,
+      "genomic_end": 7675414,
+      "cut_site": 7675411,
+      "efficiency_score": 0.97,
+      "efficiency_interpretation": "Excellent efficiency (score: 0.97)",
+      "off_target_count": null,
+      "red_flags": {
+        "total_flags": 1,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "flags": [
+          {
+            "type": "essential_gene",
+            "severity": "low",
+            "message": "TP53 is classified as an essential gene (DepMap)"
+          }
+        ],
+        "interpretation": "Minor notes only"
+      }
+    },
+    {
+      "rank": 2,
+      "spacer_sequence": "GCGCCGCAAGTAGCAGGTCC",
+      "pam_sequence": "CGG",
+      "strand": "+",
+      "genomic_start": 7676015,
+      "genomic_end": 7676035,
+      "cut_site": 7676032,
+      "efficiency_score": 0.965,
+      "efficiency_interpretation": "Excellent efficiency (score: 0.96)",
+      "off_target_count": null,
+      "red_flags": {
+        "total_flags": 1,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "flags": [
+          {
+            "type": "essential_gene",
+            "severity": "low",
+            "message": "TP53 is classified as an essential gene (DepMap)"
+          }
+        ],
+        "interpretation": "Minor notes only"
+      }
+    },
+    {
+      "rank": 3,
+      "spacer_sequence": "AGTGTAACGCATAATCGAAG",
+      "pam_sequence": "AGG",
+      "strand": "+",
+      "genomic_start": 7675944,
+      "genomic_end": 7675964,
+      "cut_site": 7675961,
+      "efficiency_score": 0.96,
+      "efficiency_interpretation": "Excellent efficiency (score: 0.96)",
+      "off_target_count": null,
+      "red_flags": {
+        "total_flags": 1,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "flags": [
+          {
+            "type": "essential_gene",
+            "severity": "low",
+            "message": "TP53 is classified as an essential gene (DepMap)"
+          }
+        ],
+        "interpretation": "Minor notes only"
+      }
+    }
+  ]
+}

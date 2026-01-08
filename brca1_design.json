@@ -1,0 +1,100 @@
+{
+  "status": "success",
+  "target": {
+    "gene": "BRCA1",
+    "gene_id": "ENSG00000012048",
+    "chromosome": "chr17",
+    "start": 43044295,
+    "end": 43170245,
+    "strand": "-",
+    "genome": "GRCh38",
+    "modality": "knockout",
+    "cas_variant": "SpCas9",
+    "sequence_length": 10398
+  },
+  "n_guides_requested": 3,
+  "n_guides_found": 1230,
+  "guides": [
+    {
+      "rank": 1,
+      "spacer_sequence": "GTCGCATATCCTGGCCACTG",
+      "pam_sequence": "AGG",
+      "strand": "+",
+      "genomic_start": 43044637,
+      "genomic_end": 43044657,
+      "cut_site": 43044654,
+      "efficiency_score": 0.97,
+      "efficiency_interpretation": "Excellent efficiency (score: 0.97)",
+      "off_target_count": null,
+      "red_flags": {
+        "total_flags": 1,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "flags": [
+          {
+            "type": "essential_gene",
+            "severity": "low",
+            "message": "BRCA1 is classified as an essential gene (DepMap)"
+          }
+        ],
+        "interpretation": "Minor notes only"
+      }
+    },
+    {
+      "rank": 2,
+      "spacer_sequence": "GTCACAGGATATAGCAACAC",
+      "pam_sequence": "TGG",
+      "strand": "+",
+      "genomic_start": 43047096,
+      "genomic_end": 43047116,
+      "cut_site": 43047113,
+      "efficiency_score": 0.97,
+      "efficiency_interpretation": "Excellent efficiency (score: 0.97)",
+      "off_target_count": null,
+      "red_flags": {
+        "total_flags": 1,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "flags": [
+          {
+            "type": "essential_gene",
+            "severity": "low",
+            "message": "BRCA1 is classified as an essential gene (DepMap)"
+          }
+        ],
+        "interpretation": "Minor notes only"
+      }
+    },
+    {
+      "rank": 3,
+      "spacer_sequence": "AGGATCAGAGTACAGGCAGG",
+      "pam_sequence": "GGG",
+      "strand": "+",
+      "genomic_start": 43049892,
+      "genomic_end": 43049912,
+      "cut_site": 43049909,
+      "efficiency_score": 0.97,
+      "efficiency_interpretation": "Excellent efficiency (score: 0.97)",
+      "off_target_count": null,
+      "red_flags": {
+        "total_flags": 1,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "flags": [
+          {
+            "type": "essential_gene",
+            "severity": "low",
+            "message": "BRCA1 is classified as an essential gene (DepMap)"
+          }
+        ],
+        "interpretation": "Minor notes only"
+      }
+    }
+  ]
+}
