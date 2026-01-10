@@ -394,7 +394,7 @@ class ExperimentPlanner:
             "modality": self.modality.value,
             "gene": gene_info.symbol if gene_info else None,
             "guides": [g.spacer.spacer_sequence for g in guides[:5]],
-            "timestamp": datetime.utcnow().isoformat(),
+            # No timestamp for reproducibility
         }
         content = json.dumps(data, sort_keys=True)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -417,7 +417,7 @@ class ExperimentPlanner:
             lines.append(f"### Guide {i}: `{guide.spacer.spacer_sequence}`")
             lines.append(f"- PAM: {guide.spacer.pam_sequence}")
             lines.append(f"- Efficiency: {guide.efficiency_score.overall_score:.2f}")
-            lines.append(f"- Position: chr{guide.spacer.genomic_start}")
+            lines.append(f"- Position: {guide.spacer.genomic_start:,}")
             lines.append("")
         
         lines.extend([

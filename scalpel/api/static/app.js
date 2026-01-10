@@ -1359,8 +1359,14 @@ async function exportPDF() {
 }
 
 function exportCSV() {
+    const count = parseInt(document.getElementById('exportCount').value) || 10;
+    const minEff = parseInt(document.getElementById('exportMinEff').value) || 0;
+    let guides = [...currentDesignData.guides];
+    if (minEff > 0) guides = guides.filter(g => g.efficiency_score >= minEff / 100);
+    guides = guides.slice(0, count);
+
     const headers = ['Rank', 'Sequence', 'PAM', 'Strand', 'Cut Site', 'Position', 'Efficiency', 'GC%'];
-    const rows = currentDesignData.guides.map(g =>
+    const rows = guides.map(g =>
         [g.rank, g.spacer_sequence, g.pam_sequence, g.strand, g.cut_site, g.genomic_start,
         (g.efficiency_score * 100).toFixed(1) + '%', calculateGC(g.spacer_sequence) + '%'].join(',')
     );
@@ -1371,6 +1377,7 @@ function exportCSV() {
     a.href = url;
     a.download = `${currentDesignData.target.gene || 'guides'}.csv`;
     a.click();
+    closeExportModal();
 }
 
 function generatePDFContent(guides) {
@@ -1479,14 +1486,6 @@ async function generatePlan() {
                 <li><strong>Day 4-7:</strong> Harvest cells for genomic DNA extraction</li>
                 <li><strong>Day 7-10:</strong> PCR and sequencing to confirm editing</li>
             </ol>
-            
-            <div style="background:#fef3c7;border:1px solid #f59e0b;padding:1rem;border-radius:8px;margin-top:1.5rem;">
-                <h4 style="color:#92400e;margin-bottom:0.5rem;font-size:0.85rem;">Important Considerations</h4>
-                <p style="color:#92400e;font-size:0.8rem;margin:0;">
-                    Always validate guides with off-target analysis. Consider testing multiple guides.
-                    For critical experiments, include appropriate controls (non-targeting gRNA, mock transfection).
-                </p>
-            </div>
         </div>
     `;
 }

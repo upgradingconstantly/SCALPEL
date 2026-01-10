@@ -132,7 +132,10 @@ class OffTargetSearcher:
         Generates realistic distribution of off-targets based on
         typical CRISPR specificity patterns.
         """
-        random.seed(hash(spacer) % 2**32)  # Reproducible per spacer
+        # Use hashlib for reproducible seeding (Python's hash() is randomized)
+        import hashlib
+        seed = int(hashlib.sha256(spacer.encode()).hexdigest()[:8], 16)
+        random.seed(seed)
         
         hits = []
         

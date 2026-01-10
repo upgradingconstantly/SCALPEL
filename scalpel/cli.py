@@ -190,13 +190,15 @@ def design(
             
             extractor = SpacerExtractor(cas_variant)
             
-            # Get sequence for extraction
-            # For demo genes, we use a synthetic sequence with PAM sites
-            if resolved.sequence and "N" not in resolved.sequence[:100]:
-                target_sequence = resolved.sequence
-            else:
-                # Generate demo sequence with PAM sites for testing
-                target_sequence = _generate_demo_sequence(resolved.end - resolved.start)
+            # Get sequence for extraction - require real genome data
+            target_sequence = resolved.sequence
+            if not target_sequence:
+                console.print(
+                    f"[red]Error:[/red] No genome reference available for {genome}.\n"
+                    f"Please download the genome FASTA to ~/.scalpel/genomes/{genome.lower()}/\n"
+                    f"See: https://ftp.ensembl.org/pub/release-112/fasta/"
+                )
+                raise typer.Exit(1)
             
             spacers = extractor.extract_spacers(
                 target_sequence,
@@ -425,11 +427,16 @@ def offtarget(
             "sites": site_output,
         })
     
+    # Pass through original data for pipeline compatibility (design | offtarget | plan)
+    input_data = data if 'data' in dir() else {}
     results = {
         "status": "success",
         "genome": genome_enum.value,
         "max_mismatches": max_mismatches,
         "analyses": analyses,
+        # Pass through for CLI pipeline
+        "target": input_data.get("target", {}),
+        "guides": input_data.get("guides", []),
     }
     
     _output_results(results, output, format)
@@ -668,7 +675,7 @@ def _output_results(results: dict, output: Optional[Path], format: str) -> None:
                     str(i),
                     guide.get("spacer_sequence", ""),
                     guide.get("pam_sequence", ""),
-                    str(guide.get("composite_score", "")),
+                    str(guide.get("efficiency_score", guide.get("composite_score", ""))),
                 ]
                 lines.append("\t".join(row))
         
@@ -692,7 +699,7 @@ def _output_results(results: dict, output: Optional[Path], format: str) -> None:
                     str(i),
                     guide.get("spacer_sequence", ""),
                     guide.get("pam_sequence", ""),
-                    f"{guide.get('composite_score', 0):.3f}",
+                    f"{guide.get('efficiency_score', guide.get('composite_score', 0)):.3f}",
                 )
             
             console.print(table)

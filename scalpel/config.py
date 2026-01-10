@@ -100,12 +100,51 @@ class SCALPELConfig(BaseSettings):
         self.models_dir.mkdir(parents=True, exist_ok=True)
     
     def get_genome_config(self, genome_name: str) -> GenomeConfig:
-        """Get configuration for a specific genome."""
+        """Get configuration for a specific genome.
+        
+        Searches multiple locations:
+        1. ~/.scalpel/genomes/{genome}/
+        2. Project-local scalpel/genomes/
+        """
+        # Try standard location first
         genome_dir = self.genomes_dir / genome_name.lower()
+        
+        # Also check project-local genomes directory
+        project_genomes_dir = Path(__file__).parent / "genomes"
+        
+        # Find FASTA file - check multiple naming conventions
+        fasta_path = None
+        possible_names = [
+            f"{genome_name}.fa",
+            f"{genome_name}.fasta",
+            # Human genomes (Ensembl naming)
+            f"Homo_sapiens.{genome_name}.dna.primary_assembly.fa",
+            f"Homo_sapiens.{genome_name}.dna.primary_assembly.fasta",
+            # Mouse genomes (Ensembl naming)
+            f"Mus_musculus.{genome_name}.dna.primary_assembly.fa",
+            f"Mus_musculus.{genome_name}.dna.primary_assembly.fasta",
+        ]
+        
+        # Check standard location
+        if genome_dir.exists():
+            for name in possible_names:
+                candidate = genome_dir / name
+                if candidate.exists():
+                    fasta_path = candidate
+                    break
+        
+        # Check project-local location if not found
+        if fasta_path is None and project_genomes_dir.exists():
+            for name in possible_names:
+                candidate = project_genomes_dir / name
+                if candidate.exists():
+                    fasta_path = candidate
+                    break
+        
         return GenomeConfig(
             name=genome_name,
-            fasta_path=genome_dir / f"{genome_name}.fa" if genome_dir.exists() else None,
-            fai_path=genome_dir / f"{genome_name}.fa.fai" if genome_dir.exists() else None,
+            fasta_path=fasta_path,
+            fai_path=fasta_path.with_suffix(".fa.fai") if fasta_path else None,
             annotation_path=genome_dir / "annotations.gtf" if genome_dir.exists() else None,
             precomputed_ot_path=genome_dir / "offtargets.duckdb" if genome_dir.exists() else None,
         )

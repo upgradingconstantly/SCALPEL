@@ -128,21 +128,14 @@ async def design_guides(request: DesignRequest):
         else:
             raise HTTPException(status_code=400, detail="Must provide gene, coordinates, or sequence")
         
-        # Get or generate sequence
+        # Get sequence - will raise RuntimeError if genome not available
         target_sequence = resolved.sequence
-        # Generate demo sequence if sequence is empty, too short, or all N's (placeholder)
-        if not target_sequence or len(target_sequence) < 50 or set(target_sequence) == {'N'}:
-            # Generate demo sequence
-            import random
-            random.seed(hash(resolved.gene_info.symbol if resolved.gene_info else "TEST"))
-            bases = "ACGT"
-            target_sequence = ""
-            for i in range(resolved.end - resolved.start):
-                if i % 50 == 0 and i > 0:
-                    pam = random.choice(["AGG", "TGG", "CGG", "GGG"])
-                    target_sequence += pam
-                else:
-                    target_sequence += random.choice(bases)
+        if not target_sequence:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Genome reference not available for {request.genome}. "
+                       f"Please download the genome FASTA to ~/.scalpel/genomes/{request.genome.lower()}/"
+            )
         
         # Extract spacers
         extractor = SpacerExtractor(cas_variant)
@@ -191,6 +184,9 @@ async def design_guides(request: DesignRequest):
         
     except TargetNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        # Genome not available
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -260,20 +256,11 @@ async def design_stream_generator(request: DesignRequest) -> AsyncGenerator[str,
         yield f"event: init\ndata: {json.dumps(init_data)}\n\n"
         await asyncio.sleep(0.05)  # Small delay for client to render
         
-        # Get or generate sequence
+        # Get sequence - will raise error if genome not available
         target_sequence = resolved.sequence
-        # Generate demo sequence if sequence is empty, too short, or all N's (placeholder)
-        if not target_sequence or len(target_sequence) < 50 or set(target_sequence) == {'N'}:
-            import random
-            random.seed(hash(resolved.gene_info.symbol if resolved.gene_info else "TEST"))
-            bases = "ACGT"
-            target_sequence = ""
-            for i in range(resolved.end - resolved.start):
-                if i % 50 == 0 and i > 0:
-                    pam = random.choice(["AGG", "TGG", "CGG", "GGG"])
-                    target_sequence += pam
-                else:
-                    target_sequence += random.choice(bases)
+        if not target_sequence:
+            yield f"event: error\ndata: {json.dumps({'error': f'Genome reference not available for {request.genome}. Please download the genome FASTA to ~/.scalpel/genomes/{request.genome.lower()}/'})}\n\n"
+            return
         
         # Extract spacers
         extractor = SpacerExtractor(cas_variant)

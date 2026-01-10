@@ -42,6 +42,7 @@ class TargetResolver:
         self.genome = genome
         self._gene_db: Optional[GeneDatabase] = None
         self._genome_ref: Optional[GenomeReference] = None
+        self._genome_ref_initialized = False
     
     @property
     def gene_db(self) -> GeneDatabase:
@@ -52,9 +53,28 @@ class TargetResolver:
     
     @property
     def genome_ref(self) -> Optional[GenomeReference]:
-        """Get genome reference if available."""
-        # Only return if FASTA file exists
+        """Lazy-load genome reference from config."""
+        if not self._genome_ref_initialized:
+            self._init_genome_reference()
+            self._genome_ref_initialized = True
         return self._genome_ref
+    
+    def _init_genome_reference(self) -> None:
+        """Try to initialize genome reference from config."""
+        from scalpel.config import get_config
+        import logging
+        
+        config = get_config()
+        genome_config = config.get_genome_config(self.genome.value)
+        
+        if genome_config.fasta_path and genome_config.fasta_path.exists():
+            try:
+                self._genome_ref = GenomeReference(self.genome, genome_config.fasta_path)
+                logging.info(f"Loaded genome reference from {genome_config.fasta_path}")
+            except Exception as e:
+                logging.warning(f"Could not load genome reference: {e}")
+        else:
+            logging.debug(f"No genome FASTA found for {self.genome.value} at {genome_config.fasta_path}")
     
     def resolve(self, spec: TargetSpecification) -> ResolvedTarget:
         """
@@ -412,15 +432,20 @@ class TargetResolver:
         """
         Get sequence from genome reference.
         
-        Returns placeholder if genome not available.
+        Raises:
+            RuntimeError: If genome reference is not available
         """
         if self.genome_ref is not None:
             try:
                 return self.genome_ref.get_sequence(chromosome, start, end, strand)
-            except Exception:
-                pass
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to fetch sequence {chromosome}:{start}-{end}: {e}"
+                )
         
-        # Return placeholder sequence for demo/testing
-        # In production, this would require actual genome files
-        length = end - start
-        return "N" * min(length, 10000)  # Placeholder
+        # No genome reference available - raise helpful error
+        raise RuntimeError(
+            f"No genome reference available for {self.genome.value}. "
+            f"Please download the genome FASTA file to ~/.scalpel/genomes/{self.genome.value.lower()}/. "
+            f"See documentation for download instructions."
+        )
