@@ -1,8 +1,18 @@
-# SCALPEL
+<p align="center">
+  <img src="assets/logo.png" alt="SCALPEL Logo" width="600">
+</p>
 
-**S**mart **C**RISPR **A**nalysis **L**ibrary for **P**recision **E**diting and **L**ocus-targeting
+<h1 align="center"><em>SCALPEL</em></h1>
 
-A comprehensive computational CRISPR design platform for gRNA design, off-target analysis, experiment planning, and red flag detection across multiple editing modalities.
+<p align="center">
+  <strong>S</strong>mart <strong>C</strong>RISPR <strong>A</strong>nalysis <strong>L</strong>ibrary for <strong>P</strong>recision <strong>E</strong>diting and <strong>L</strong>ocus-targeting
+</p>
+
+<p align="center">
+  A comprehensive computational CRISPR design platform for gRNA design, off-target analysis, experiment planning, and red flag detection across multiple editing modalities.
+</p>
+
+---
 
 ## Features
 
