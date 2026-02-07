@@ -6,15 +6,15 @@ Provides off-target site identification and risk assessment.
 
 from __future__ import annotations
 
-import re
+import os
 from typing import List, Optional, Dict, Any, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-import random
+
 
 from scalpel.models.enums import Genome, Strand
 from scalpel.models.data_classes import OffTargetSite, OffTargetAnalysis, RiskDistribution
-from scalpel.offtarget.cfd_scorer import CFDScorer, calculate_cfd_score
+from scalpel.offtarget.cfd_scorer import CFDScorer
 
 
 @dataclass
@@ -27,6 +27,10 @@ class OffTargetHit:
     pam: str
     mismatches: List[Tuple[int, str, str]]
     mismatch_count: int
+
+
+class OffTargetIndexNotFoundError(RuntimeError):
+    """Raised when an off-target index database is unavailable."""
 
 
 class OffTargetSearcher:
@@ -72,13 +76,12 @@ class OffTargetSearcher:
         
         # Try database search first
         if self.use_database:
-            hits = self._search_database(spacer)
+            hits = self._search_database(spacer, include_pam_variants=include_pam_variants)
         else:
             hits = []
         
-        # If no database or no hits, use simulation for demo
-        if not hits:
-            hits = self._simulate_offtargets(spacer)
+        # If no database available, return empty results with warning
+        # Do NOT simulate fake off-targets - laboratory use requires real data
         
         # Score and filter hits
         sites = []
@@ -119,65 +122,143 @@ class OffTargetSearcher:
             genome=self.genome,
         )
     
-    def _search_database(self, spacer: str) -> List[OffTargetHit]:
-        """Search pre-computed database for off-targets."""
-        # TODO: Implement DuckDB search
-        # For now, return empty - will trigger simulation
-        return []
-    
-    def _simulate_offtargets(self, spacer: str) -> List[OffTargetHit]:
+    def _search_database(
+        self,
+        spacer: str,
+        include_pam_variants: bool = True,
+    ) -> List[OffTargetHit]:
+        """Search pre-computed database for off-targets.
         """
-        Simulate off-target sites for demo/testing.
-        
-        Generates realistic distribution of off-targets based on
-        typical CRISPR specificity patterns.
-        """
-        # Use hashlib for reproducible seeding (Python's hash() is randomized)
-        import hashlib
-        seed = int(hashlib.sha256(spacer.encode()).hexdigest()[:8], 16)
-        random.seed(seed)
-        
-        hits = []
-        
-        # Generate off-targets with various mismatch counts
-        mismatch_distribution = {
-            1: random.randint(0, 3),   # 0-3 with 1 mismatch
-            2: random.randint(2, 10),  # 2-10 with 2 mismatches
-            3: random.randint(10, 50), # 10-50 with 3 mismatches
-            4: random.randint(50, 200),# 50-200 with 4 mismatches
-        }
-        
-        chromosomes = ["chr1", "chr2", "chr3", "chr5", "chr7", "chr11", "chr17"]
-        pams = ["AGG", "TGG", "CGG", "GGG", "AAG", "TAG"]
-        
-        for n_mismatches, count in mismatch_distribution.items():
-            if n_mismatches > self.max_mismatches:
+        db_path = self._resolve_database_path()
+        if db_path is None:
+            raise OffTargetIndexNotFoundError(
+                f"Off-target index not found for {self.genome.value}. "
+                f"Build it with: python -m scalpel.offtarget.build_index --genome {self.genome.value}"
+            )
+
+        try:
+            import duckdb
+        except Exception as e:
+            raise RuntimeError(f"DuckDB is required for off-target search: {e}")
+
+        # Guarantee at least one seed chunk.
+        n_chunks = max(1, self.max_mismatches + 1)
+        seed_windows = self._build_seed_windows(len(spacer), n_chunks)
+
+        # Deduplicate candidates found by multiple seed hits.
+        raw_candidates: Dict[Tuple[str, int, str, str, str], Tuple[str, int, str, str, str]] = {}
+
+        # Keep result volume bounded during seed lookup.
+        per_seed_limit = max(5000, 200000 // len(seed_windows))
+
+        try:
+            with duckdb.connect(str(db_path), read_only=True) as conn:
+                for start, end in seed_windows:
+                    seed = spacer[start:end]
+                    if not seed:
+                        continue
+
+                    rows = conn.execute(
+                        """
+                        SELECT chromosome, position, strand, spacer, pam
+                        FROM pam_sites
+                        WHERE length(spacer) = ?
+                          AND substr(spacer, ?, ?) = ?
+                        LIMIT ?
+                        """,
+                        [
+                            len(spacer),
+                            start + 1,  # DuckDB substr is 1-indexed.
+                            len(seed),
+                            seed,
+                            per_seed_limit,
+                        ],
+                    ).fetchall()
+
+                    for row in rows:
+                        key = (row[0], int(row[1]), row[2], row[3], row[4])
+                        raw_candidates[key] = key
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to query off-target index at {db_path}: {e}. "
+                f"Rebuild with: python -m scalpel.offtarget.build_index --genome {self.genome.value}"
+            ) from e
+
+        hits: List[OffTargetHit] = []
+        for chromosome, position, strand, candidate_spacer, pam in raw_candidates.values():
+            if not include_pam_variants and not pam.endswith("GG"):
                 continue
-            
-            for _ in range(count):
-                # Generate off-target sequence with random mismatches
-                off_seq = list(spacer)
-                mismatches = []
-                
-                # Choose random positions for mismatches
-                positions = random.sample(range(20), n_mismatches)
-                for pos in positions:
-                    orig_base = off_seq[pos]
-                    new_base = random.choice([b for b in "ACGT" if b != orig_base])
-                    off_seq[pos] = new_base
-                    mismatches.append((pos + 1, orig_base, new_base))
-                
-                hits.append(OffTargetHit(
-                    chromosome=random.choice(chromosomes),
-                    position=random.randint(1000000, 200000000),
-                    strand=random.choice(["+", "-"]),
-                    sequence="".join(off_seq),
-                    pam=random.choice(pams),
+
+            mismatches = self._find_mismatches(spacer, candidate_spacer)
+            mismatch_count = len(mismatches)
+
+            # Exclude on-target site and trim to requested mismatch radius.
+            if mismatch_count == 0 or mismatch_count > self.max_mismatches:
+                continue
+
+            hits.append(
+                OffTargetHit(
+                    chromosome=chromosome,
+                    position=position,
+                    strand=strand,
+                    sequence=candidate_spacer,
+                    pam=pam,
                     mismatches=mismatches,
-                    mismatch_count=n_mismatches,
-                ))
-        
+                    mismatch_count=mismatch_count,
+                )
+            )
+
+        # Lowest mismatch count first before downstream risk sort.
+        hits.sort(key=lambda h: h.mismatch_count)
         return hits
+
+    def _resolve_database_path(self) -> Optional[Path]:
+        """Resolve off-target DB path with explicit precedence."""
+        env_path = os.getenv("SCALPEL_OFFTARGET_DB")
+        if env_path:
+            candidate = Path(env_path).expanduser()
+            if candidate.exists():
+                self._db_path = candidate
+                return candidate
+            raise OffTargetIndexNotFoundError(
+                f"SCALPEL_OFFTARGET_DB is set but file does not exist: {candidate}"
+            )
+
+        candidates = [
+            Path.home() / ".scalpel" / "offtargets" / f"{self.genome.value}.duckdb",
+            Path.home() / ".scalpel" / "genomes" / self.genome.value / "offtargets.duckdb",
+            # Backward-compatible lowercase fallback.
+            Path.home() / ".scalpel" / "genomes" / self.genome.value.lower() / "offtargets.duckdb",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                self._db_path = candidate
+                return candidate
+
+        return None
+
+    @staticmethod
+    def _build_seed_windows(sequence_length: int, n_chunks: int) -> List[Tuple[int, int]]:
+        """
+        Partition the sequence into windows used for seed filtering.
+        Any sequence within k mismatches must match at least one of k+1 windows.
+        """
+        windows: List[Tuple[int, int]] = []
+        for i in range(n_chunks):
+            start = (sequence_length * i) // n_chunks
+            end = (sequence_length * (i + 1)) // n_chunks
+            if end > start:
+                windows.append((start, end))
+        return windows
+
+    @staticmethod
+    def _find_mismatches(on_target: str, candidate: str) -> List[Tuple[int, str, str]]:
+        """Return mismatch tuples: (1-indexed position, on_target_base, candidate_base)."""
+        mismatches: List[Tuple[int, str, str]] = []
+        for i, (on_base, candidate_base) in enumerate(zip(on_target, candidate), start=1):
+            if on_base != candidate_base:
+                mismatches.append((i, on_base, candidate_base))
+        return mismatches
     
     def _calculate_risk(self, cfd_score: float, hit: OffTargetHit) -> float:
         """

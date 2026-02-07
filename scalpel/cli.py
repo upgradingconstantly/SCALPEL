@@ -12,15 +12,15 @@ Pipe-friendly:
 
 import json
 import sys
+import io
 from pathlib import Path
 from typing import Optional, List
-from enum import Enum
 
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, TextColumn
 
 from scalpel import __version__
 from scalpel.models.enums import Genome, EditModality, CasVariantType
@@ -34,6 +34,26 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 console = Console()
+progress_console = Console(stderr=True)
+
+
+def _supports_unicode(stream: io.TextIOBase) -> bool:
+    """True when the stream encoding can safely render unicode progress glyphs."""
+    encoding = (getattr(stream, "encoding", None) or "").lower()
+    return "utf" in encoding
+
+
+def _is_machine_readable_output(format: str, output: Optional[Path], stream: bool) -> bool:
+    """Detect output modes that should not include progress UI on stdout/stderr."""
+    if stream:
+        return True
+    return format in {"json", "tsv"} and output is None
+
+
+def _should_show_progress(format: str, output: Optional[Path], stream: bool) -> bool:
+    if _is_machine_readable_output(format, output, stream):
+        return False
+    return sys.stderr.isatty() and _supports_unicode(sys.stderr)
 
 
 # =============================================================================
@@ -146,153 +166,163 @@ def design(
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
     
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
+    show_progress = _should_show_progress(format=format, output=output, stream=stream)
+    progress: Optional[Progress] = None
+    task_id: Optional[int] = None
+    if show_progress:
+        progress = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            console=progress_console,
+        )
+        progress.start()
+        task_id = progress.add_task("Resolving target...", total=None)
+
+    def _update_progress(message: str) -> None:
+        if progress is not None and task_id is not None:
+            progress.update(task_id, description=message)
+
+    # Import target resolver
+    from scalpel.genome.target_resolver import TargetResolver, TargetNotFoundError
+    from scalpel.models.data_classes import TargetSpecification
+    from scalpel.models.enums import TargetType
+
+    try:
+        # Build target specification
+        if gene:
+            target_type = TargetType.GENE_SYMBOL
+            target_value = gene
+        elif sequence:
+            target_type = TargetType.SEQUENCE
+            target_value = sequence
+        else:
+            target_type = TargetType.GENOMIC_COORDINATES
+            target_value = coordinates
+
+        spec = TargetSpecification(
+            target_type=target_type,
+            target_value=target_value,
+            genome=genome_enum,
+            modality=modality,
+            cas_variant=cas_variant,
+        )
+
         # Resolve target
-        task = progress.add_task("Resolving target...", total=None)
-        
-        # Import target resolver
-        from scalpel.genome.target_resolver import TargetResolver, TargetNotFoundError
-        from scalpel.models.data_classes import TargetSpecification
-        from scalpel.models.enums import TargetType
-        
-        try:
-            # Build target specification
-            if gene:
-                target_type = TargetType.GENE_SYMBOL
-                target_value = gene
-            elif sequence:
-                target_type = TargetType.SEQUENCE
-                target_value = sequence
-            else:
-                target_type = TargetType.GENOMIC_COORDINATES
-                target_value = coordinates
-            
-            spec = TargetSpecification(
-                target_type=target_type,
-                target_value=target_value,
-                genome=genome_enum,
-                modality=modality,
-                cas_variant=cas_variant,
+        resolver = TargetResolver(genome_enum)
+        resolved = resolver.resolve(spec)
+
+        _update_progress("Extracting spacers...")
+
+        # Extract spacers using the Stage 3 engine
+        from scalpel.design import SpacerExtractor
+
+        extractor = SpacerExtractor(cas_variant)
+
+        # Get sequence for extraction - require real genome data
+        target_sequence = resolved.sequence
+        if not target_sequence:
+            console.print(
+                f"[red]Error:[/red] No genome reference available for {genome}.\n"
+                f"Please download the genome FASTA to ~/.scalpel/genomes/{genome.lower()}/\n"
+                f"See: https://ftp.ensembl.org/pub/release-112/fasta/"
             )
-            
-            # Resolve target
-            resolver = TargetResolver(genome_enum)
-            resolved = resolver.resolve(spec)
-            
-            progress.update(task, description="Extracting spacers...")
-            
-            # Extract spacers using the Stage 3 engine
-            from scalpel.design import SpacerExtractor
-            
-            extractor = SpacerExtractor(cas_variant)
-            
-            # Get sequence for extraction - require real genome data
-            target_sequence = resolved.sequence
-            if not target_sequence:
-                console.print(
-                    f"[red]Error:[/red] No genome reference available for {genome}.\n"
-                    f"Please download the genome FASTA to ~/.scalpel/genomes/{genome.lower()}/\n"
-                    f"See: https://ftp.ensembl.org/pub/release-112/fasta/"
-                )
-                raise typer.Exit(1)
-            
-            spacers = extractor.extract_spacers(
-                target_sequence,
-                chromosome=resolved.chromosome,
-                start_position=resolved.start,
+            raise typer.Exit(1)
+
+        spacers = extractor.extract_spacers(
+            target_sequence,
+            chromosome=resolved.chromosome,
+            start_position=resolved.start,
+        )
+
+        _update_progress(f"Found {len(spacers)} candidates, scoring...")
+
+        # Score spacers for efficiency (Stage 4)
+        from scalpel.design.efficiency import EnsembleScorer
+
+        scorer = EnsembleScorer()
+        scored_guides = scorer.score_batch(spacers, modality.value, n_top=n_guides)
+
+        _update_progress(f"Ranked {len(scored_guides)} guides!")
+
+        # Convert to output format
+        guide_output = []
+        for i, sg in enumerate(scored_guides, 1):
+            guide_output.append({
+                "rank": i,
+                "spacer_sequence": sg.spacer.spacer_sequence,
+                "pam_sequence": sg.spacer.pam_sequence,
+                "strand": sg.spacer.strand.value,
+                "genomic_start": sg.spacer.genomic_start,
+                "genomic_end": sg.spacer.genomic_end,
+                "cut_site": sg.spacer.cut_site,
+                "efficiency_score": round(sg.efficiency.overall_score, 3),
+                "efficiency_interpretation": sg.efficiency.interpretation,
+                "off_target_count": None,  # Will be filled by offtarget command
+            })
+
+        # Add red flag detection (Stage 7)
+        from scalpel.core.red_flags import detect_red_flags, summarize_red_flags
+
+        for guide in guide_output:
+            # Find the corresponding spacer
+            spacer_seq = guide["spacer_sequence"]
+            matching_spacer = next(
+                (sg.spacer for sg in scored_guides if sg.spacer.spacer_sequence == spacer_seq),
+                None
             )
-            
-            progress.update(task, description=f"Found {len(spacers)} candidates, scoring...")
-            
-            # Score spacers for efficiency (Stage 4)
-            from scalpel.design.efficiency import EnsembleScorer
-            
-            scorer = EnsembleScorer()
-            scored_guides = scorer.score_batch(spacers, modality.value, n_top=n_guides)
-            
-            progress.update(task, description=f"Ranked {len(scored_guides)} guides!")
-            
-            # Convert to output format
-            guide_output = []
-            for i, sg in enumerate(scored_guides, 1):
-                guide_output.append({
-                    "rank": i,
-                    "spacer_sequence": sg.spacer.spacer_sequence,
-                    "pam_sequence": sg.spacer.pam_sequence,
-                    "strand": sg.spacer.strand.value,
-                    "genomic_start": sg.spacer.genomic_start,
-                    "genomic_end": sg.spacer.genomic_end,
-                    "cut_site": sg.spacer.cut_site,
-                    "efficiency_score": round(sg.efficiency.overall_score, 3),
-                    "efficiency_interpretation": sg.efficiency.interpretation,
-                    "off_target_count": None,  # Will be filled by offtarget command
-                })
-            
-            # Add red flag detection (Stage 7)
-            from scalpel.core.red_flags import detect_red_flags, summarize_red_flags
-            
-            for guide in guide_output:
-                # Find the corresponding spacer
-                spacer_seq = guide["spacer_sequence"]
-                matching_spacer = next(
-                    (sg.spacer for sg in scored_guides if sg.spacer.spacer_sequence == spacer_seq),
-                    None
-                )
-                if matching_spacer:
-                    flags = detect_red_flags(matching_spacer, gene_info=resolved.gene_info)
-                    flag_summary = summarize_red_flags(flags)
-                    guide["red_flags"] = flag_summary
-            
-            progress.update(task, description="Design complete!")
-            
-            # Build results
-            results = {
-                "status": "success",
-                "target": {
-                    "gene": resolved.gene_info.symbol if resolved.gene_info else None,
-                    "gene_id": resolved.gene_info.gene_id if resolved.gene_info else None,
-                    "chromosome": resolved.chromosome,
-                    "start": resolved.start,
-                    "end": resolved.end,
-                    "strand": resolved.strand.value,
-                    "genome": genome_enum.value,
-                    "modality": modality.value,
-                    "cas_variant": cas_variant.value,
-                    "sequence_length": len(target_sequence),
-                },
-                "n_guides_requested": n_guides,
-                "n_guides_found": len(spacers),
-                "guides": guide_output,
-            }
-            
-            # Add transcript info if available
-            if resolved.transcript:
-                results["target"]["transcript_id"] = resolved.transcript.transcript_id
-                results["target"]["is_mane_select"] = resolved.transcript.is_mane_select
-                if resolved.transcript.exons:
-                    results["target"]["n_exons"] = len(resolved.transcript.exons)
-        
-        except TargetNotFoundError as e:
-            results = {
-                "status": "error",
-                "error": str(e),
-                "target": {
-                    "gene": gene,
-                    "sequence": sequence,
-                    "coordinates": coordinates,
-                },
-                "guides": [],
-            }
-        except Exception as e:
-            results = {
-                "status": "error",
-                "error": f"Unexpected error: {e}",
-                "guides": [],
-            }
+            if matching_spacer:
+                flags = detect_red_flags(matching_spacer, gene_info=resolved.gene_info)
+                flag_summary = summarize_red_flags(flags)
+                guide["red_flags"] = flag_summary
+
+        _update_progress("Design complete!")
+
+        # Build results
+        results = {
+            "status": "success",
+            "target": {
+                "gene": resolved.gene_info.symbol if resolved.gene_info else None,
+                "gene_id": resolved.gene_info.gene_id if resolved.gene_info else None,
+                "chromosome": resolved.chromosome,
+                "start": resolved.start,
+                "end": resolved.end,
+                "strand": resolved.strand.value,
+                "genome": genome_enum.value,
+                "modality": modality.value,
+                "cas_variant": cas_variant.value,
+                "sequence_length": len(target_sequence),
+            },
+            "n_guides_requested": n_guides,
+            "n_guides_found": len(spacers),
+            "guides": guide_output,
+        }
+
+        # Add transcript info if available
+        if resolved.transcript:
+            results["target"]["transcript_id"] = resolved.transcript.transcript_id
+            results["target"]["is_mane_select"] = resolved.transcript.is_mane_select
+            if resolved.transcript.exons:
+                results["target"]["n_exons"] = len(resolved.transcript.exons)
+
+    except TargetNotFoundError as e:
+        results = {
+            "status": "error",
+            "error": str(e),
+            "target": {
+                "gene": gene,
+                "sequence": sequence,
+                "coordinates": coordinates,
+            },
+            "guides": [],
+        }
+    except Exception as e:
+        results = {
+            "status": "error",
+            "error": f"Unexpected error: {e}",
+            "guides": [],
+        }
+    finally:
+        if progress is not None:
+            progress.stop()
     
     # Output
     if stream:
@@ -390,45 +420,52 @@ def offtarget(
         raise typer.Exit(1)
     
     # Run off-target analysis
-    from scalpel.offtarget import OffTargetSearcher, RiskCalculator
+    from scalpel.offtarget import OffTargetSearcher, RiskCalculator, OffTargetIndexNotFoundError
     
     searcher = OffTargetSearcher(genome_enum, max_mismatches=max_mismatches)
     risk_calc = RiskCalculator(genome_enum)
     
     analyses = []
-    for spacer_seq in spacers_to_analyze:
-        # Search for off-targets
-        analysis = searcher.search(spacer_seq)
-        
-        # Generate summary
-        summary = risk_calc.generate_summary(analysis)
-        
-        # Convert to output format
-        site_output = []
-        for site in analysis.sites[:20]:  # Limit to top 20
-            site_output.append({
-                "chromosome": site.chromosome,
-                "position": site.position,
-                "strand": site.strand.value,
-                "sequence": site.sequence,
-                "pam": site.pam,
-                "mismatches": site.mismatch_count,
-                "cfd_score": round(site.cutting_probability, 4),
-                "risk_score": round(site.risk_score, 3),
+    try:
+        for spacer_seq in spacers_to_analyze:
+            # Search for off-targets
+            analysis = searcher.search(spacer_seq)
+            
+            # Generate summary
+            summary = risk_calc.generate_summary(analysis)
+            
+            # Convert to output format
+            site_output = []
+            for site in analysis.sites[:20]:  # Limit to top 20
+                site_output.append({
+                    "chromosome": site.chromosome,
+                    "position": site.position,
+                    "strand": site.strand.value,
+                    "sequence": site.sequence,
+                    "pam": site.pam,
+                    "mismatches": site.mismatch_count,
+                    "cfd_score": round(site.cutting_probability, 4),
+                    "risk_score": round(site.risk_score, 3),
+                })
+            
+            analyses.append({
+                "spacer": spacer_seq,
+                "total_sites": summary["total_sites"],
+                "high_risk_count": summary["high_risk_count"],
+                "specificity_score": summary["specificity_score"],
+                "interpretation": summary["interpretation"],
+                "sites_by_mismatch": summary["sites_by_mismatch"],
+                "sites": site_output,
             })
-        
-        analyses.append({
-            "spacer": spacer_seq,
-            "total_sites": summary["total_sites"],
-            "high_risk_count": summary["high_risk_count"],
-            "specificity_score": summary["specificity_score"],
-            "interpretation": summary["interpretation"],
-            "sites_by_mismatch": summary["sites_by_mismatch"],
-            "sites": site_output,
-        })
+    except OffTargetIndexNotFoundError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print(
+            f"[yellow]Build index:[/yellow] python -m scalpel.offtarget.build_index --genome {genome_enum.value}"
+        )
+        raise typer.Exit(1)
     
     # Pass through original data for pipeline compatibility (design | offtarget | plan)
-    input_data = data if 'data' in dir() else {}
+    input_data = data if "data" in locals() else {}
     results = {
         "status": "success",
         "genome": genome_enum.value,
@@ -574,6 +611,223 @@ def plan(
 
 
 # =============================================================================
+# Batch command
+# =============================================================================
+
+@app.command()
+def batch(
+    input_file: Path = typer.Argument(
+        ...,
+        help="Input file with gene list (one gene per line, or CSV with 'gene' column)",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output", "-o",
+        help="Output file (JSON or CSV based on extension)",
+    ),
+    genome: str = typer.Option(
+        "GRCh38",
+        "--genome",
+        help="Reference genome",
+    ),
+    modality: EditModality = typer.Option(
+        EditModality.KNOCKOUT,
+        "--modality", "-m",
+        help="Editing modality",
+    ),
+    cas_variant: CasVariantType = typer.Option(
+        CasVariantType.SPCAS9,
+        "--cas",
+        help="Cas protein variant",
+    ),
+    n_guides: int = typer.Option(
+        5,
+        "--n-guides", "-n",
+        help="Number of guides per gene",
+    ),
+    format: str = typer.Option(
+        "json",
+        "--format", "-f",
+        help="Output format: json, csv, tsv",
+    ),
+) -> None:
+    """
+    Design gRNAs for multiple genes from a file.
+    
+    Input file can be:
+    - Plain text with one gene per line
+    - CSV with a 'gene' column
+    
+    Examples:
+        scalpel batch genes.txt --output results.json
+        scalpel batch genes.csv --format csv --n-guides 10
+    """
+    # Read genes from input file
+    genes = []
+    
+    if not input_file.exists():
+        console.print(f"[red]Error:[/red] Input file not found: {input_file}")
+        raise typer.Exit(1)
+    
+    content = input_file.read_text()
+    
+    # Try to parse as CSV first
+    if input_file.suffix.lower() == ".csv" or "," in content.split("\n")[0]:
+        import csv as csv_mod
+        reader = csv_mod.DictReader(content.splitlines())
+        for row in reader:
+            # Look for 'gene' column (case-insensitive)
+            gene_col = next((k for k in row.keys() if k.lower() in ['gene', 'genes', 'symbol', 'gene_symbol']), None)
+            if gene_col and row[gene_col].strip():
+                genes.append(row[gene_col].strip().upper())
+    else:
+        # Plain text, one gene per line
+        for line in content.splitlines():
+            gene = line.strip().upper()
+            if gene and not gene.startswith('#'):
+                genes.append(gene)
+    
+    if not genes:
+        console.print("[red]Error:[/red] No genes found in input file")
+        raise typer.Exit(1)
+    
+    console.print(f"[blue]Processing {len(genes)} genes...[/blue]")
+    
+    # Parse genome
+    try:
+        genome_enum = Genome.from_string(genome)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+    
+    # Process genes
+    from scalpel.genome.target_resolver import TargetResolver, TargetNotFoundError
+    from scalpel.design import SpacerExtractor
+    from scalpel.design.efficiency import EnsembleScorer
+    from scalpel.core.red_flags import detect_red_flags, summarize_red_flags
+    from scalpel.models.data_classes import TargetSpecification
+    from scalpel.models.enums import TargetType
+    
+    resolver = TargetResolver(genome_enum)
+    extractor = SpacerExtractor(cas_variant)
+    scorer = EnsembleScorer()
+    
+    all_results = []
+    errors = []
+    
+    show_progress = _should_show_progress(format=format, output=output, stream=False)
+    progress: Optional[Progress] = None
+    task_id: Optional[int] = None
+    if show_progress:
+        progress = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            console=progress_console,
+        )
+        progress.start()
+        task_id = progress.add_task(f"Processing 0/{len(genes)} genes...", total=len(genes))
+
+    try:
+        for i, gene in enumerate(genes):
+            if progress is not None and task_id is not None:
+                progress.update(task_id, description=f"Processing {gene} ({i+1}/{len(genes)})...")
+            
+            try:
+                spec = TargetSpecification(
+                    target_type=TargetType.GENE_SYMBOL,
+                    target_value=gene,
+                    genome=genome_enum,
+                    modality=modality,
+                    cas_variant=cas_variant,
+                )
+                
+                resolved = resolver.resolve(spec)
+                target_sequence = resolved.sequence
+                
+                if not target_sequence:
+                    errors.append({"gene": gene, "error": "No sequence available"})
+                    continue
+                
+                spacers = extractor.extract_spacers(
+                    target_sequence,
+                    chromosome=resolved.chromosome,
+                    start_position=resolved.start,
+                )
+                
+                scored_guides = scorer.score_batch(spacers, modality.value, n_top=n_guides)
+                
+                for rank, sg in enumerate(scored_guides, 1):
+                    flags = detect_red_flags(sg.spacer, gene_info=resolved.gene_info)
+                    flag_summary = summarize_red_flags(flags)
+                    
+                    all_results.append({
+                        "gene": gene,
+                        "rank": rank,
+                        "spacer_sequence": sg.spacer.spacer_sequence,
+                        "pam_sequence": sg.spacer.pam_sequence,
+                        "strand": sg.spacer.strand.value,
+                        "chromosome": resolved.chromosome,
+                        "genomic_start": sg.spacer.genomic_start,
+                        "genomic_end": sg.spacer.genomic_end,
+                        "cut_site": sg.spacer.cut_site,
+                        "efficiency_score": round(sg.efficiency.overall_score, 3),
+                        "interpretation": sg.efficiency.interpretation,
+                        "red_flags": flag_summary.get("interpretation", "") if isinstance(flag_summary, dict) else "",
+                    })
+                    
+            except TargetNotFoundError as e:
+                errors.append({"gene": gene, "error": str(e)})
+            except Exception as e:
+                errors.append({"gene": gene, "error": f"Unexpected: {str(e)}"})
+            
+            if progress is not None and task_id is not None:
+                progress.advance(task_id)
+    finally:
+        if progress is not None:
+            progress.stop()
+    
+    # Report results
+    console.print(f"\n[green]Processed {len(genes) - len(errors)}/{len(genes)} genes[/green]")
+    console.print(f"[green]Generated {len(all_results)} guides[/green]")
+    
+    if errors:
+        console.print(f"[yellow]WARN: {len(errors)} genes had errors:[/yellow]")
+        for err in errors[:5]:
+            console.print(f"  - {err['gene']}: {err['error']}")
+        if len(errors) > 5:
+            console.print(f"  ... and {len(errors) - 5} more")
+    
+    # Output
+    results = {
+        "status": "success",
+        "genome": genome,
+        "modality": modality.value,
+        "n_genes_processed": len(genes) - len(errors),
+        "total_guides": len(all_results),
+        "guides": all_results,
+        "errors": errors,
+    }
+    
+    if format.lower() == "csv":
+        import csv as csv_mod
+        import io
+        output_buffer = io.StringIO()
+        if all_results:
+            fieldnames = list(all_results[0].keys())
+            writer = csv_mod.DictWriter(output_buffer, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_results)
+        csv_content = output_buffer.getvalue()
+        
+        if output:
+            output.write_text(csv_content)
+            console.print(f"[green]Results written to {output}[/green]")
+        else:
+            print(csv_content)
+    else:
+        _output_results(results, output, format)
+
+
+# =============================================================================
 # Info command
 # =============================================================================
 
@@ -609,7 +863,11 @@ def info() -> None:
         CasVariantType.SPCAS9: "NGG",
         CasVariantType.SPCAS9_NG: "NG",
         CasVariantType.SPCAS9_VQR: "NGA",
+        CasVariantType.SPRY: "NRN/NYN",
+        CasVariantType.XCAS9: "NG/GAA/GAT",
         CasVariantType.SACAS9: "NNGRRT",
+        CasVariantType.SACAS9_KKH: "NNNRRT",
+        CasVariantType.CJCAS9: "NNNNRYAC",
         CasVariantType.CAS12A: "TTTV",
         CasVariantType.CAS12A_RR: "TYCV",
     }

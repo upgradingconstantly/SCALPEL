@@ -6,13 +6,13 @@ Combines rule-based and ML-based scoring for robust efficiency prediction.
 
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict
 from dataclasses import dataclass
-import math
 
 from scalpel.models.data_classes import SpacerCandidate, EfficiencyScore
 from scalpel.design.efficiency.features import FeatureExtractor, SpacerFeatures
 from scalpel.design.efficiency.rule_based import RuleBasedScorer, RuleScore
+from scalpel.design.efficiency.crispron_model import CRISPRonPredictor, get_predictor
 
 
 @dataclass
@@ -32,16 +32,14 @@ class EnsembleScorer:
     1. Rule-based scoring (Doench rules)
     2. Position-specific scoring
     3. Modality-specific adjustments
-    
-    Future:
-    4. ML model (DeepSpacerEncoder) - Stage 4b
+    4. CRISPRon ML model (CNN-based deep learning)
     """
     
     def __init__(
         self,
-        use_ml_model: bool = False,
-        rule_weight: float = 0.7,
-        ml_weight: float = 0.3,
+        use_ml_model: bool = True,
+        rule_weight: float = 0.5,
+        ml_weight: float = 0.5,
     ):
         self.use_ml_model = use_ml_model
         self.rule_weight = rule_weight
@@ -50,8 +48,13 @@ class EnsembleScorer:
         self.feature_extractor = FeatureExtractor()
         self.rule_scorer = RuleBasedScorer()
         
-        # ML model would be loaded here
-        self._ml_model = None
+        # CRISPRon ML model (lazy loaded global instance)
+        self._crispron: CRISPRonPredictor | None = None
+        if self.use_ml_model:
+            try:
+                self._crispron = get_predictor()
+            except Exception:
+                self._crispron = None
     
     def score_single(
         self,
@@ -81,8 +84,8 @@ class EnsembleScorer:
             spacer.pam_sequence,
         )
         
-        # ML score (placeholder - returns rule score for now)
-        if self.use_ml_model and self._ml_model is not None:
+        # Blend in ML score when a predictor is available.
+        if self.use_ml_model and self._crispron is not None:
             ml_score = self._predict_ml(features)
             combined_score = (
                 self.rule_weight * rule_score + 
@@ -106,12 +109,16 @@ class EnsembleScorer:
             name: rs.score for name, rs in rule_details.items()
         }
         
+        model_version = "SCALPEL Ensemble v1 (rule)"
+        if self.use_ml_model and self._crispron is not None:
+            model_version = "SCALPEL Ensemble v1 (rule+ml)"
+
         efficiency = EfficiencyScore(
             overall_score=adjusted_score,
             components=components,
             confidence_interval=(max(0, adjusted_score - 0.1), min(1, adjusted_score + 0.1)),
             interpretation=interpretation,
-            model_version="SCALPEL Ensemble v1",
+            model_version=model_version,
         )
         
         return ScoredGuide(
@@ -152,9 +159,23 @@ class EnsembleScorer:
         return scored
     
     def _predict_ml(self, features: SpacerFeatures) -> float:
-        """ML model prediction (placeholder for Stage 4b)."""
-        # Return rule-based as fallback
-        return 0.5
+        """ML model prediction using CRISPRon-style deep learning."""
+        spacer = "".join(
+            features.position_bases.get(i, "N")
+            for i in range(1, len(features.position_bases) + 1)
+        )
+        if not spacer:
+            return 0.5
+
+        pam = features.pam if features.pam else "NGG"
+
+        if self._crispron is None:
+            # No model is available; return rule-based fallback.
+            return self.rule_scorer.score(spacer, pam)[0]
+
+        # CRISPRonPredictor accepts 20-30bp and pads/truncates internally.
+        sequence_for_model = f"{spacer}{features.pam}" if features.pam else spacer
+        return self._crispron.predict(sequence_for_model)
     
     def _apply_modality_adjustment(
         self,

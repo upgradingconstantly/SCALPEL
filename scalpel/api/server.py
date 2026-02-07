@@ -4,16 +4,50 @@ SCALPEL Web API
 FastAPI-based web interface for the CRISPR design platform.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Response, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, List, AsyncGenerator
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List, AsyncGenerator, Dict, Any
 from pathlib import Path
+from collections import defaultdict
 import uvicorn
 import asyncio
 import json
+import csv
+import io
+import time
+from datetime import datetime
+
+
+# Simple in-memory rate limiter
+class RateLimiter:
+    def __init__(self, requests_per_minute: int = 60):
+        self.requests_per_minute = requests_per_minute
+        self.requests: Dict[str, List[float]] = defaultdict(list)
+
+    def is_allowed(self, client_id: str) -> bool:
+        now = time.time()
+        minute_ago = now - 60
+
+        # Clean old requests
+        self.requests[client_id] = [t for t in self.requests[client_id] if t > minute_ago]
+
+        if len(self.requests[client_id]) >= self.requests_per_minute:
+            return False
+
+        self.requests[client_id].append(now)
+        return True
+
+    def get_remaining(self, client_id: str) -> int:
+        now = time.time()
+        minute_ago = now - 60
+        recent = [t for t in self.requests[client_id] if t > minute_ago]
+        return max(0, self.requests_per_minute - len(recent))
+
+
+rate_limiter = RateLimiter(requests_per_minute=60)
 
 app = FastAPI(
     title="SCALPEL",
@@ -40,28 +74,237 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # =============================================================================
 
 class DesignRequest(BaseModel):
-    gene: Optional[str] = None
-    coordinates: Optional[str] = None
-    sequence: Optional[str] = None
-    modality: str = "knockout"
-    genome: str = "GRCh38"
-    cas_variant: str = "SpCas9"
-    n_guides: int = 10
+    gene: Optional[str] = Field(None, min_length=1, max_length=50, description="Gene symbol (e.g., TP53, BRCA1)")
+    coordinates: Optional[str] = Field(None, pattern=r"^chr[\dXYMT]+:\d+-\d+(:[+-])?$", description="Genomic coordinates (e.g., chr17:7668421-7687490)")
+    sequence: Optional[str] = Field(None, min_length=20, max_length=10000, description="DNA sequence (20-10000bp)")
+    modality: str = Field("knockout", description="Editing modality")
+    genome: str = Field("GRCh38", description="Reference genome")
+    cas_variant: str = Field("SpCas9", description="Cas protein variant")
+    n_guides: int = Field(10, ge=1, le=2000, description="Number of guides to return")
+
+    @field_validator('gene')
+    @classmethod
+    def validate_gene(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            v = v.strip().upper()
+            if not v.replace('-', '').replace('_', '').isalnum():
+                raise ValueError("Gene symbol must contain only alphanumeric characters, hyphens, or underscores")
+        return v
+
+    @field_validator('sequence')
+    @classmethod
+    def validate_sequence(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            v = v.strip().upper()
+            valid_bases = set("ACGTN")
+            invalid = set(v) - valid_bases
+            if invalid:
+                raise ValueError(f"Invalid bases in sequence: {invalid}. Only A, C, G, T, N allowed.")
+        return v
+
+    @field_validator('modality')
+    @classmethod
+    def validate_modality(cls, v: str) -> str:
+        valid = {"knockout", "interference", "activation", "base_edit_cbe", 
+                 "base_edit_abe", "base_edit_gbe", "prime_edit", 
+                 "crisproff", "dual_nickase"}
+        if v not in valid:
+            raise ValueError(f"Invalid modality. Must be one of: {', '.join(valid)}")
+        return v
+
+    @field_validator('cas_variant')
+    @classmethod
+    def validate_cas_variant(cls, v: str) -> str:
+        valid = {"SpCas9", "SpCas9-NG", "SpCas9-VQR", "SpRY", "xCas9", 
+                 "SaCas9", "SaCas9-KKH", "CjCas9", "Cas12a", "Cas12a-RR"}
+        if v not in valid:
+            raise ValueError(f"Invalid Cas variant. Must be one of: {', '.join(valid)}")
+        return v
 
 
 class OffTargetRequest(BaseModel):
-    spacer: str
-    genome: str = "GRCh38"
-    max_mismatches: int = 4
+    spacer: str = Field(..., min_length=17, max_length=25, description="Spacer sequence (17-25bp)")
+    genome: str = Field("GRCh38", description="Reference genome")
+    max_mismatches: int = Field(4, ge=0, le=6, description="Maximum mismatches to search (0-6)")
+
+    @field_validator('spacer')
+    @classmethod
+    def validate_spacer(cls, v: str) -> str:
+        v = v.strip().upper()
+        valid_bases = set("ACGT")
+        invalid = set(v) - valid_bases
+        if invalid:
+            raise ValueError(f"Invalid bases in spacer: {invalid}. Only A, C, G, T allowed.")
+        return v
 
 
 class PlanRequest(BaseModel):
-    design_data: dict
+    design_data: dict = Field(..., description="Design results from /api/design endpoint")
+
+
+class BatchDesignRequest(BaseModel):
+    """Request model for batch guide design across multiple genes."""
+    genes: List[str] = Field(..., min_length=1, max_length=100, description="List of gene symbols")
+    genome: str = Field("GRCh38", description="Reference genome")
+    modality: str = Field("knockout", description="Editing modality")
+    cas_variant: str = Field("SpCas9", description="Cas protein variant")
+    n_guides_per_gene: int = Field(5, ge=1, le=100, description="Number of guides per gene")
+
+    @field_validator('genes')
+    @classmethod
+    def validate_genes(cls, v: List[str]) -> List[str]:
+        return [g.strip().upper() for g in v if g.strip()]
+
+    @field_validator('modality')
+    @classmethod
+    def validate_modality(cls, v: str) -> str:
+        valid = {"knockout", "interference", "activation", "base_edit_cbe", 
+                 "base_edit_abe", "base_edit_gbe", "prime_edit", 
+                 "crisproff", "dual_nickase"}
+        if v not in valid:
+            raise ValueError(f"Invalid modality. Must be one of: {', '.join(valid)}")
+        return v
+
+
+# =============================================================================
+# Shared Design Helpers
+# =============================================================================
+
+def _build_target_spec(
+    request: DesignRequest,
+    genome_enum: Any,
+    modality: Any,
+    cas_variant: Any,
+    target_spec_cls: Any,
+    target_type_enum: Any,
+) -> Any:
+    """Build TargetSpecification from request body."""
+    if request.gene:
+        return target_spec_cls(
+            target_type=target_type_enum.GENE_SYMBOL,
+            target_value=request.gene,
+            genome=genome_enum,
+            modality=modality,
+            cas_variant=cas_variant,
+        )
+    if request.coordinates:
+        return target_spec_cls(
+            target_type=target_type_enum.GENOMIC_COORDINATES,
+            target_value=request.coordinates,
+            genome=genome_enum,
+            modality=modality,
+            cas_variant=cas_variant,
+        )
+    if request.sequence:
+        return target_spec_cls(
+            target_type=target_type_enum.SEQUENCE,
+            target_value=request.sequence,
+            genome=genome_enum,
+            modality=modality,
+            cas_variant=cas_variant,
+        )
+    raise HTTPException(status_code=400, detail="Must provide gene, coordinates, or sequence")
+
+
+def _run_design_pipeline(request: DesignRequest) -> Dict[str, Any]:
+    """Run shared design pipeline used by sync and streaming endpoints."""
+    from scalpel.genome import TargetResolver
+    from scalpel.models.enums import Genome, EditModality, CasVariantType, TargetType
+    from scalpel.models.data_classes import TargetSpecification
+    from scalpel.design import SpacerExtractor
+    from scalpel.design.efficiency import EnsembleScorer
+    from scalpel.core.red_flags import detect_red_flags, summarize_red_flags
+
+    # Parse enums
+    genome_enum = Genome.from_string(request.genome)
+    modality = EditModality(request.modality)
+    cas_variant = CasVariantType(request.cas_variant)
+
+    # Resolve target
+    resolver = TargetResolver(genome_enum)
+    spec = _build_target_spec(
+        request=request,
+        genome_enum=genome_enum,
+        modality=modality,
+        cas_variant=cas_variant,
+        target_spec_cls=TargetSpecification,
+        target_type_enum=TargetType,
+    )
+    resolved = resolver.resolve(spec)
+
+    target_sequence = resolved.sequence
+    if not target_sequence:
+        raise RuntimeError(
+            f"Genome reference not available for {request.genome}. "
+            f"Please download the genome FASTA to ~/.scalpel/genomes/{request.genome.lower()}/"
+        )
+
+    # Extract and score
+    extractor = SpacerExtractor(cas_variant)
+    spacers = extractor.extract_spacers(
+        target_sequence,
+        chromosome=resolved.chromosome,
+        start_position=resolved.start,
+    )
+    scorer = EnsembleScorer()
+    scored_guides = scorer.score_batch(spacers, modality.value, n_top=request.n_guides)
+
+    guides = []
+    for i, sg in enumerate(scored_guides, 1):
+        flags = detect_red_flags(sg.spacer, gene_info=resolved.gene_info)
+        flag_summary = summarize_red_flags(flags)
+        guides.append({
+            "rank": i,
+            "spacer_sequence": sg.spacer.spacer_sequence,
+            "pam_sequence": sg.spacer.pam_sequence,
+            "strand": sg.spacer.strand.value,
+            "genomic_start": sg.spacer.genomic_start,
+            "genomic_end": sg.spacer.genomic_end,
+            "cut_site": sg.spacer.cut_site,
+            "efficiency_score": round(sg.efficiency.overall_score, 3),
+            "efficiency_interpretation": sg.efficiency.interpretation,
+            "red_flags": flag_summary,
+        })
+
+    target = {
+        "gene": resolved.gene_info.symbol if resolved.gene_info else None,
+        "chromosome": resolved.chromosome,
+        "start": resolved.start,
+        "end": resolved.end,
+        "strand": resolved.strand.value,
+        "genome": genome_enum.value,
+        "modality": modality.value,
+    }
+
+    return {
+        "target": target,
+        "guides": guides,
+        "n_candidates_total": len(spacers),
+        "n_guides_returned": len(guides),
+    }
 
 
 # =============================================================================
 # API Endpoints
 # =============================================================================
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Apply rate limiting to API endpoints."""
+    if request.url.path.startswith("/api/"):
+        client_ip = request.client.host if request.client else "unknown"
+        if not rate_limiter.is_allowed(client_ip):
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "detail": "Rate limit exceeded. Please wait before making more requests.",
+                    "retry_after": 60
+                },
+                headers={"Retry-After": "60"}
+            )
+    response = await call_next(request)
+    return response
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -78,108 +321,212 @@ async def health():
     return {"status": "healthy", "version": "0.1.0"}
 
 
+@app.get("/api/info")
+async def info():
+    """Get available options for design parameters."""
+    return {
+        "modalities": [
+            {"value": "knockout", "label": "Knockout (NHEJ)", "description": "Gene disruption via frameshift mutations"},
+            {"value": "interference", "label": "CRISPRi", "description": "Transcriptional repression via dCas9-KRAB"},
+            {"value": "activation", "label": "CRISPRa", "description": "Transcriptional activation via dCas9-VP64"},
+            {"value": "base_edit_cbe", "label": "Base Edit (CBE)", "description": "C→T base conversion"},
+            {"value": "base_edit_abe", "label": "Base Edit (ABE)", "description": "A→G base conversion"},
+            {"value": "base_edit_gbe", "label": "Base Edit (GBE)", "description": "C→G base transversion"},
+            {"value": "prime_edit", "label": "Prime Edit", "description": "Precise insertions/deletions/substitutions"},
+            {"value": "crisproff", "label": "CRISPRoff", "description": "Heritable epigenetic silencing via DNA methylation"},
+            {"value": "dual_nickase", "label": "Dual-Nickase", "description": "Paired guides for high-specificity editing"},
+        ],
+        "genomes": [
+            {"value": "GRCh38", "label": "Human (GRCh38/hg38)", "species": "Homo sapiens"},
+            {"value": "GRCh37", "label": "Human (GRCh37/hg19)", "species": "Homo sapiens"},
+            {"value": "GRCm39", "label": "Mouse (GRCm39/mm39)", "species": "Mus musculus"},
+            {"value": "GRCm38", "label": "Mouse (GRCm38/mm10)", "species": "Mus musculus"},
+            {"value": "GRCz11", "label": "Zebrafish (GRCz11)", "species": "Danio rerio"},
+            {"value": "mRatBN7.2", "label": "Rat (mRatBN7.2)", "species": "Rattus norvegicus"},
+            {"value": "BDGP6", "label": "Drosophila (BDGP6/dm6)", "species": "Drosophila melanogaster"},
+            {"value": "WBcel235", "label": "C. elegans (WBcel235/ce11)", "species": "Caenorhabditis elegans"},
+            {"value": "Sscrofa11.1", "label": "Pig (Sscrofa11.1)", "species": "Sus scrofa"},
+            {"value": "TAIR10", "label": "Arabidopsis (TAIR10)", "species": "Arabidopsis thaliana"},
+        ],
+        "cas_variants": [
+            {"value": "SpCas9", "pam": "NGG", "description": "Standard S. pyogenes Cas9"},
+            {"value": "SpCas9-NG", "pam": "NG", "description": "Relaxed PAM variant"},
+            {"value": "SpCas9-VQR", "pam": "NGA", "description": "Alternative PAM variant"},
+            {"value": "SpRY", "pam": "NRN/NYN", "description": "Near-PAMless SpCas9 variant"},
+            {"value": "xCas9", "pam": "NG/GAA/GAT", "description": "Expanded PAM recognition"},
+            {"value": "SaCas9", "pam": "NNGRRT", "description": "S. aureus Cas9 (smaller)"},
+            {"value": "SaCas9-KKH", "pam": "NNNRRT", "description": "Relaxed SaCas9 variant"},
+            {"value": "CjCas9", "pam": "NNNNRYAC", "description": "Smallest Cas9 (22bp spacer)"},
+            {"value": "Cas12a", "pam": "TTTV", "description": "Cpf1 with staggered cuts"},
+            {"value": "Cas12a-RR", "pam": "TYCV", "description": "Cas12a RR variant"},
+        ],
+    }
+
+
+@app.post("/api/export/csv")
+async def export_csv(design_data: dict):
+    """Export design results as CSV."""
+    guides = design_data.get("guides", [])
+    target = design_data.get("target", {})
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header
+    writer.writerow([
+        "Rank", "Spacer_Sequence", "PAM", "Strand", "Genomic_Start",
+        "Genomic_End", "Cut_Site", "Efficiency_Score", "Interpretation", "Red_Flags"
+    ])
+
+    # Data rows
+    for guide in guides:
+        flags = guide.get("red_flags", {})
+        flag_text = flags.get("interpretation", "") if isinstance(flags, dict) else ""
+        writer.writerow([
+            guide.get("rank", ""),
+            guide.get("spacer_sequence", ""),
+            guide.get("pam_sequence", ""),
+            guide.get("strand", ""),
+            guide.get("genomic_start", ""),
+            guide.get("genomic_end", ""),
+            guide.get("cut_site", ""),
+            guide.get("efficiency_score", ""),
+            guide.get("efficiency_interpretation", ""),
+            flag_text,
+        ])
+
+    content = output.getvalue()
+    gene = target.get("gene", "guides")
+    filename = f"scalpel_{gene}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.post("/api/export/json")
+async def export_json(design_data: dict):
+    """Export design results as JSON."""
+    target = design_data.get("target", {})
+    gene = target.get("gene", "guides")
+    filename = f"scalpel_{gene}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    export_data = {
+        "scalpel_version": "0.1.0",
+        "export_time": datetime.now().isoformat(),
+        **design_data
+    }
+
+    return Response(
+        content=json.dumps(export_data, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.post("/api/export/fasta")
+async def export_fasta(design_data: dict):
+    """Export spacer sequences as FASTA."""
+    guides = design_data.get("guides", [])
+    target = design_data.get("target", {})
+    gene = target.get("gene", "target")
+
+    lines = []
+    for guide in guides:
+        seq = guide.get("spacer_sequence", "")
+        rank = guide.get("rank", 0)
+        score = guide.get("efficiency_score", 0)
+        pos = guide.get("genomic_start", 0)
+
+        header = f">{gene}_guide{rank}_pos{pos}_eff{score:.2f}"
+        lines.append(header)
+        lines.append(seq)
+
+    content = "\n".join(lines)
+    filename = f"scalpel_{gene}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.fasta"
+
+    return Response(
+        content=content,
+        media_type="text/plain",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+class OligoExportRequest(BaseModel):
+    """Request model for oligo export."""
+    design_data: dict = Field(..., description="Design results from /api/design endpoint")
+    method: str = Field("golden_gate_bbsi", description="Cloning method: golden_gate_bbsi, golden_gate_bsai, gibson, direct_ligation")
+
+
+@app.post("/api/export/oligos")
+async def export_oligos(request: OligoExportRequest):
+    """Export cloning-ready oligonucleotides for designed guides.
+    
+    Generates forward and reverse oligos with appropriate overhangs
+    for the selected cloning strategy (Golden Gate, Gibson, etc.)
+    
+    Returns IDT-compatible CSV format.
+    """
+    try:
+        from scalpel.cloning import OligoGenerator, CloningMethod
+        
+        guides = request.design_data.get("guides", [])
+        target = request.design_data.get("target", {})
+        gene = target.get("gene", "guide")
+        
+        # Parse cloning method
+        try:
+            cloning_method = CloningMethod(request.method)
+        except ValueError:
+            cloning_method = CloningMethod.GOLDEN_GATE_BBSI
+        
+        generator = OligoGenerator(method=cloning_method)
+        
+        # Generate oligos for each guide
+        spacer_data = []
+        for guide in guides:
+            spacer = guide.get("spacer_sequence", "")
+            rank = guide.get("rank", 0)
+            name = f"{gene}_g{rank}"
+            spacer_data.append({
+                "spacer": spacer,
+                "name": name,
+                "gene": gene,
+            })
+        
+        oligo_pairs = generator.generate_batch(spacer_data)
+        
+        # Export as IDT CSV
+        content = generator.export_idt_format(oligo_pairs)
+        filename = f"scalpel_{gene}_oligos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        return Response(
+            content=content,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/design")
 async def design_guides(request: DesignRequest):
     """Design gRNAs for a target."""
     try:
-        from scalpel.genome import TargetResolver, GeneDatabase, get_demo_gene
         from scalpel.genome.target_resolver import TargetNotFoundError
-        from scalpel.design import SpacerExtractor
-        from scalpel.design.efficiency import EnsembleScorer
-        from scalpel.core.red_flags import detect_red_flags, summarize_red_flags
-        from scalpel.models.enums import Genome, EditModality, CasVariantType, TargetType
-        from scalpel.models.data_classes import TargetSpecification
-        
-        # Parse enums
-        genome_enum = Genome.from_string(request.genome)
-        modality = EditModality(request.modality)
-        cas_variant = CasVariantType(request.cas_variant)
-        
-        # Resolve target
-        resolver = TargetResolver(genome_enum)
-        
-        if request.gene:
-            spec = TargetSpecification(
-                target_type=TargetType.GENE_SYMBOL,
-                target_value=request.gene,
-                genome=genome_enum,
-                modality=modality,
-                cas_variant=cas_variant
-            )
-            resolved = resolver.resolve(spec)
-        elif request.coordinates:
-            spec = TargetSpecification(
-                target_type=TargetType.GENOMIC_COORDINATES,
-                target_value=request.coordinates,
-                genome=genome_enum,
-                modality=modality,
-                cas_variant=cas_variant
-            )
-            resolved = resolver.resolve(spec)
-        elif request.sequence:
-            spec = TargetSpecification(
-                target_type=TargetType.SEQUENCE,
-                target_value=request.sequence,
-                genome=genome_enum,
-                modality=modality,
-                cas_variant=cas_variant
-            )
-            resolved = resolver.resolve(spec)
-        else:
-            raise HTTPException(status_code=400, detail="Must provide gene, coordinates, or sequence")
-        
-        # Get sequence - will raise RuntimeError if genome not available
-        target_sequence = resolved.sequence
-        if not target_sequence:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Genome reference not available for {request.genome}. "
-                       f"Please download the genome FASTA to ~/.scalpel/genomes/{request.genome.lower()}/"
-            )
-        
-        # Extract spacers
-        extractor = SpacerExtractor(cas_variant)
-        spacers = extractor.extract_spacers(
-            target_sequence,
-            chromosome=resolved.chromosome,
-            start_position=resolved.start,
-        )
-        
-        # Score
-        scorer = EnsembleScorer()
-        scored_guides = scorer.score_batch(spacers, modality.value, n_top=None)  # Return ALL candidates
-        
-        # Build output
-        guides = []
-        for i, sg in enumerate(scored_guides, 1):
-            flags = detect_red_flags(sg.spacer, gene_info=resolved.gene_info)
-            flag_summary = summarize_red_flags(flags)
-            
-            guides.append({
-                "rank": i,
-                "spacer_sequence": sg.spacer.spacer_sequence,
-                "pam_sequence": sg.spacer.pam_sequence,
-                "strand": sg.spacer.strand.value,
-                "genomic_start": sg.spacer.genomic_start,
-                "genomic_end": sg.spacer.genomic_end,
-                "cut_site": sg.spacer.cut_site,
-                "efficiency_score": round(sg.efficiency.overall_score, 3),
-                "efficiency_interpretation": sg.efficiency.interpretation,
-                "red_flags": flag_summary,
-            })
-        
+        result = _run_design_pipeline(request)
+
         return {
             "status": "success",
-            "target": {
-                "gene": resolved.gene_info.symbol if resolved.gene_info else None,
-                "chromosome": resolved.chromosome,
-                "start": resolved.start,
-                "end": resolved.end,
-                "genome": genome_enum.value,
-                "modality": modality.value,
-            },
-            "n_guides_found": len(spacers),
-            "guides": guides,
+            "target": result["target"],
+            # Backward-compatible legacy field
+            "n_guides_found": result["n_candidates_total"],
+            "n_candidates_total": result["n_candidates_total"],
+            "n_guides_returned": result["n_guides_returned"],
+            "guides": result["guides"],
         }
         
     except TargetNotFoundError as e:
@@ -194,115 +541,41 @@ async def design_guides(request: DesignRequest):
 async def design_stream_generator(request: DesignRequest) -> AsyncGenerator[str, None]:
     """Async generator that yields guides as Server-Sent Events."""
     try:
-        from scalpel.genome import TargetResolver, GeneDatabase, get_demo_gene
         from scalpel.genome.target_resolver import TargetNotFoundError
-        from scalpel.design import SpacerExtractor
-        from scalpel.design.efficiency import EnsembleScorer
-        from scalpel.core.red_flags import detect_red_flags, summarize_red_flags
-        from scalpel.models.enums import Genome, EditModality, CasVariantType, TargetType
-        from scalpel.models.data_classes import TargetSpecification
-        
-        # Parse enums
-        genome_enum = Genome.from_string(request.genome)
-        modality = EditModality(request.modality)
-        cas_variant = CasVariantType(request.cas_variant)
-        
-        # Resolve target
-        resolver = TargetResolver(genome_enum)
-        
-        if request.gene:
-            spec = TargetSpecification(
-                target_type=TargetType.GENE_SYMBOL,
-                target_value=request.gene,
-                genome=genome_enum,
-                modality=modality,
-                cas_variant=cas_variant
-            )
-            resolved = resolver.resolve(spec)
-        elif request.coordinates:
-            spec = TargetSpecification(
-                target_type=TargetType.GENOMIC_COORDINATES,
-                target_value=request.coordinates,
-                genome=genome_enum,
-                modality=modality,
-                cas_variant=cas_variant
-            )
-            resolved = resolver.resolve(spec)
-        elif request.sequence:
-            spec = TargetSpecification(
-                target_type=TargetType.SEQUENCE,
-                target_value=request.sequence,
-                genome=genome_enum,
-                modality=modality,
-                cas_variant=cas_variant
-            )
-            resolved = resolver.resolve(spec)
-        else:
-            yield f"event: error\ndata: {json.dumps({'error': 'Must provide gene, coordinates, or sequence'})}\n\n"
-            return
+        result = _run_design_pipeline(request)
         
         # Send init event with target info
         init_data = {
             "type": "init",
-            "target": {
-                "gene": resolved.gene_info.symbol if resolved.gene_info else None,
-                "chromosome": resolved.chromosome,
-                "start": resolved.start,
-                "end": resolved.end,
-                "genome": genome_enum.value,
-                "modality": modality.value,
-            }
+            "target": result["target"],
         }
         yield f"event: init\ndata: {json.dumps(init_data)}\n\n"
         await asyncio.sleep(0.05)  # Small delay for client to render
-        
-        # Get sequence - will raise error if genome not available
-        target_sequence = resolved.sequence
-        if not target_sequence:
-            yield f"event: error\ndata: {json.dumps({'error': f'Genome reference not available for {request.genome}. Please download the genome FASTA to ~/.scalpel/genomes/{request.genome.lower()}/'})}\n\n"
-            return
-        
-        # Extract spacers
-        extractor = SpacerExtractor(cas_variant)
-        spacers = extractor.extract_spacers(
-            target_sequence,
-            chromosome=resolved.chromosome,
-            start_position=resolved.start,
-        )
-        
+
         # Send progress event
-        yield f"event: progress\ndata: {json.dumps({'stage': 'scoring', 'total_spacers': len(spacers)})}\n\n"
+        yield f"event: progress\ndata: {json.dumps({'stage': 'scoring', 'total_spacers': result['n_candidates_total'], 'n_candidates_total': result['n_candidates_total']})}\n\n"
         await asyncio.sleep(0.05)
-        
-        # Score and stream guides one by one
-        scorer = EnsembleScorer()
-        scored_guides = scorer.score_batch(spacers, modality.value, n_top=None)  # Return ALL candidates
-        
-        for i, sg in enumerate(scored_guides, 1):
-            flags = detect_red_flags(sg.spacer, gene_info=resolved.gene_info)
-            flag_summary = summarize_red_flags(flags)
-            
-            guide_data = {
-                "rank": i,
-                "spacer_sequence": sg.spacer.spacer_sequence,
-                "pam_sequence": sg.spacer.pam_sequence,
-                "strand": sg.spacer.strand.value,
-                "genomic_start": sg.spacer.genomic_start,
-                "genomic_end": sg.spacer.genomic_end,
-                "cut_site": sg.spacer.cut_site,
-                "efficiency_score": round(sg.efficiency.overall_score, 3),
-                "efficiency_interpretation": sg.efficiency.interpretation,
-                "red_flags": flag_summary,
-            }
+
+        # Stream guides one by one
+        for guide_data in result["guides"]:
             yield f"event: guide\ndata: {json.dumps(guide_data)}\n\n"
             await asyncio.sleep(0.1)  # Delay to show progressive loading
         
         # Done event
-        done_data = {"n_guides_returned": len(scored_guides), "n_guides_found": len(spacers)}
+        done_data = {
+            "n_guides_returned": result["n_guides_returned"],
+            # Backward-compatible legacy field
+            "n_guides_found": result["n_candidates_total"],
+            "n_candidates_total": result["n_candidates_total"],
+        }
         yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
         
     except TargetNotFoundError as e:
         yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+    except RuntimeError as e:
+        yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+    except HTTPException as e:
+        yield f"event: error\ndata: {json.dumps({'error': str(e.detail)})}\n\n"
     except Exception as e:
         yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
@@ -329,11 +602,113 @@ async def design_guides_stream(request: DesignRequest):
     )
 
 
+@app.post("/api/design/batch")
+async def design_batch(request: BatchDesignRequest):
+    """Design gRNAs for multiple genes in batch.
+    
+    Processes each gene and returns combined results with gene column.
+    Ideal for high-throughput screening workflows.
+    """
+    try:
+        from scalpel.genome import TargetResolver
+        from scalpel.genome.target_resolver import TargetNotFoundError
+        from scalpel.design import SpacerExtractor
+        from scalpel.design.efficiency import EnsembleScorer
+        from scalpel.core.red_flags import detect_red_flags, summarize_red_flags
+        from scalpel.models.enums import Genome, EditModality, CasVariantType, TargetType
+        from scalpel.models.data_classes import TargetSpecification
+        
+        # Parse enums
+        genome_enum = Genome.from_string(request.genome)
+        modality = EditModality(request.modality)
+        cas_variant = CasVariantType(request.cas_variant)
+        
+        # Initialize shared components
+        resolver = TargetResolver(genome_enum)
+        extractor = SpacerExtractor(cas_variant)
+        scorer = EnsembleScorer()
+        
+        all_results = []
+        errors = []
+        
+        for gene in request.genes:
+            try:
+                # Resolve gene
+                spec = TargetSpecification(
+                    target_type=TargetType.GENE_SYMBOL,
+                    target_value=gene,
+                    genome=genome_enum,
+                    modality=modality,
+                    cas_variant=cas_variant
+                )
+                resolved = resolver.resolve(spec)
+                
+                # Get sequence
+                target_sequence = resolved.sequence
+                if not target_sequence:
+                    errors.append({"gene": gene, "error": f"No sequence available for {gene}"})
+                    continue
+                
+                # Extract and score spacers
+                spacers = extractor.extract_spacers(
+                    target_sequence,
+                    chromosome=resolved.chromosome,
+                    start_position=resolved.start,
+                )
+                scored_guides = scorer.score_batch(spacers, modality.value, n_top=request.n_guides_per_gene)
+                
+                # Format results
+                for i, sg in enumerate(scored_guides, 1):
+                    flags = detect_red_flags(sg.spacer, gene_info=resolved.gene_info)
+                    flag_summary = summarize_red_flags(flags)
+                    
+                    all_results.append({
+                        "gene": gene,
+                        "rank": i,
+                        "spacer_sequence": sg.spacer.spacer_sequence,
+                        "pam_sequence": sg.spacer.pam_sequence,
+                        "strand": sg.spacer.strand.value,
+                        "chromosome": resolved.chromosome,
+                        "genomic_start": sg.spacer.genomic_start,
+                        "genomic_end": sg.spacer.genomic_end,
+                        "cut_site": sg.spacer.cut_site,
+                        "efficiency_score": round(sg.efficiency.overall_score, 3),
+                        "efficiency_interpretation": sg.efficiency.interpretation,
+                        "red_flags": flag_summary,
+                    })
+                    
+            except TargetNotFoundError as e:
+                errors.append({"gene": gene, "error": str(e)})
+            except RuntimeError as e:
+                errors.append({"gene": gene, "error": str(e)})
+            except Exception as e:
+                errors.append({"gene": gene, "error": f"Unexpected error: {str(e)}"})
+        
+        return {
+            "status": "success",
+            "genome": request.genome,
+            "modality": request.modality,
+            "n_genes_requested": len(request.genes),
+            "n_genes_processed": len(request.genes) - len(errors),
+            "n_guides_per_gene": request.n_guides_per_gene,
+            "total_guides": len(all_results),
+            "guides": all_results,
+            "errors": errors,
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/offtarget")
 async def analyze_offtargets(request: OffTargetRequest):
     """Analyze off-target sites for a spacer."""
     try:
-        from scalpel.offtarget import OffTargetSearcher, RiskCalculator
+        from scalpel.offtarget import (
+            OffTargetSearcher,
+            RiskCalculator,
+            OffTargetIndexNotFoundError,
+        )
         from scalpel.models.enums import Genome
         
         genome_enum = Genome.from_string(request.genome)
@@ -363,7 +738,8 @@ async def analyze_offtargets(request: OffTargetRequest):
             "sites_by_mismatch": summary["sites_by_mismatch"],
             "sites": sites,
         }
-        
+    except OffTargetIndexNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
