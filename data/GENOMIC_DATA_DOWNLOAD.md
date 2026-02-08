@@ -444,3 +444,63 @@ Runtime lookup order for off-target DB:
 | GENCODE | https://www.gencodegenes.org/human/ |
 | NCBI GenBank | https://ftp.ncbi.nlm.nih.gov/genomes/ |
 | UCSC Genome Browser | https://hgdownload.soe.ucsc.edu/downloads.html |
+
+---
+
+## Path Conventions (Standardized)
+
+SCALPEL uses consistent path conventions across all modules:
+
+### Environment Variables
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `SCALPEL_DATA_DIR` | Base data directory | `~/.scalpel` |
+| `SCALPEL_GENOMES_DIR` | Genome files location | `~/.scalpel/genomes` |
+| `SCALPEL_MODELS_DIR` | ML model weights | `~/.scalpel/models` |
+| `SCALPEL_OFFTARGET_DB` | Explicit off-target DB path | `/path/to/GRCh38.duckdb` |
+
+### Default Paths
+
+| Asset | Default Location |
+|-------|------------------|
+| Genome FASTA | `~/.scalpel/genomes/{genome}/` |
+| Gene annotations (GTF) | `~/.scalpel/genomes/{genome}/` |
+| Off-target index | `~/.scalpel/offtargets/{genome}.duckdb` |
+| Off-target (fallback) | `~/.scalpel/genomes/{genome}/offtargets.duckdb` |
+| Cache database | `~/.scalpel/cache.db` |
+| Model weights | `~/.scalpel/models/` |
+
+---
+
+## Training-Free Operation
+
+> [!IMPORTANT]
+> **SCALPEL works without any ML model training.**
+
+### Scoring Modes
+
+| Mode | Requirements |
+|------|--------------|
+| **Rule-based (default)** | None - works immediately |
+| **ML-enhanced (optional)** | Pretrained weights only |
+
+### Rule-Based Scoring (Default)
+
+The default scorer combines validated heuristics:
+- GC content, seed region analysis, homopolymer penalties
+- Position bias, secondary structure, Rule Set 2 (Doench 2016)
+- ML score falls back to 0.5 if no model available
+
+### No Training Required
+
+```python
+from scalpel.design.efficiency import EnsembleScorer
+
+scorer = EnsembleScorer()  # Uses rule-based by default
+score = scorer.score_guide(spacer="ATGGATTTATCTGCTCTTCG")
+# Returns valid score without any ML models
+```
+
+**Rule-based scoring produces publication-quality results without any setup.**
+
