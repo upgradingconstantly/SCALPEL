@@ -280,6 +280,10 @@ class OffTargetAnalysis(BaseModel):
     db_path: Optional[str] = None  # Path to database used
     candidate_count: int = 0  # Raw candidates before filtering
     search_ms: float = 0.0  # Search time in milliseconds
+    
+    # Warning flags (B1.3)
+    warnings: List[str] = Field(default_factory=list)  # e.g. ["cap_hit", "truncated"]
+    is_partial: bool = False  # True if results may be incomplete
 
 
 # =============================================================================

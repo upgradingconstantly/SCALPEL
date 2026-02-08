@@ -144,6 +144,11 @@ class CRISPRonPredictor:
             return
         
         if self.model_path.exists():
+            # B4.2: Validate checksum if manifest exists
+            if not self._validate_checksum():
+                logger.warning("Model checksum validation failed, using rule-based fallback")
+                return
+            
             try:
                 self.model = CRISPRonCNN()
                 state_dict = torch.load(self.model_path, map_location="cpu")
@@ -165,6 +170,52 @@ class CRISPRonPredictor:
                 "Using rule-based scoring. To enable ML predictions, "
                 "download weights or train the model."
             )
+    
+    def _validate_checksum(self) -> bool:
+        """
+        B4.2: Validate model checksum against manifest.
+        
+        Returns True if no manifest exists (assume valid) or checksum matches.
+        Returns False if manifest exists but checksum doesn't match.
+        """
+        import hashlib
+        
+        manifest_path = self.model_path.parent / "manifest.json"
+        if not manifest_path.exists():
+            # No manifest = no validation (backwards compatible)
+            return True
+        
+        try:
+            import json
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            
+            expected_checksum = manifest.get("sha256")
+            expected_version = manifest.get("version")
+            
+            if expected_checksum:
+                # Calculate actual checksum
+                sha256 = hashlib.sha256()
+                with open(self.model_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        sha256.update(chunk)
+                actual_checksum = sha256.hexdigest()
+                
+                if actual_checksum != expected_checksum:
+                    logger.error(
+                        f"Model checksum mismatch! "
+                        f"Expected: {expected_checksum[:16]}..., "
+                        f"Got: {actual_checksum[:16]}..."
+                    )
+                    return False
+                
+                logger.info(f"Model checksum validated (version: {expected_version or 'unknown'})")
+            
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Could not validate checksum: {e}")
+            return True  # Allow loading if validation code fails
     
     @property
     def is_model_available(self) -> bool:

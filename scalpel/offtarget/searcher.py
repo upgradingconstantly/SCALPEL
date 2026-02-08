@@ -120,6 +120,16 @@ class OffTargetSearcher:
         # Calculate search time
         search_ms = (time.perf_counter() - start_time) * 1000
         
+        # B1.3: Generate warnings for partial search conditions
+        warnings = []
+        is_partial = False
+        per_seed_limit = max(5000, 200000 // max(1, self.max_mismatches + 1))
+        if candidate_count >= per_seed_limit:
+            warnings.append("cap_hit")
+            is_partial = True
+        if len(sites) == 0 and candidate_count > 0:
+            warnings.append("all_filtered")
+        
         return OffTargetAnalysis(
             on_target_spacer=spacer,
             sites=sites,
@@ -134,6 +144,9 @@ class OffTargetSearcher:
             db_path=str(self._db_path) if self._db_path else None,
             candidate_count=candidate_count,
             search_ms=round(search_ms, 2),
+            # Warning flags (B1.3)
+            warnings=warnings,
+            is_partial=is_partial,
         )
     
     def _search_database(
