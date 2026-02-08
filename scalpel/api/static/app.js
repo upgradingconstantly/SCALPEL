@@ -25,7 +25,40 @@ document.addEventListener('DOMContentLoaded', () => {
     setupKeyboardShortcuts();
     setupInfiniteScroll();
     setupGeneInputDropdown();
+    loadAvailableOptions();  // Load dynamic dropdowns
 });
+
+// ===== DYNAMIC OPTIONS =====
+async function loadAvailableOptions() {
+    try {
+        const response = await fetch('/api/info');
+        const data = await response.json();
+
+        // Only show built genomes (7 currently available)
+        const builtGenomes = ['GRCh38', 'GRCh37', 'GRCm39', 'BDGP6', 'WBcel235', 'Sscrofa11.1', 'TAIR10'];
+        const availableGenomes = data.genomes.filter(g => builtGenomes.includes(g.value));
+
+        // Populate genome dropdown
+        const genomeSelect = document.getElementById('genome');
+        genomeSelect.innerHTML = availableGenomes.map(g =>
+            `<option value="${g.value}">${g.label}</option>`
+        ).join('');
+
+        // Populate modality dropdown
+        const modalitySelect = document.getElementById('modality');
+        modalitySelect.innerHTML = data.modalities.map(m =>
+            `<option value="${m.value}">${m.label}</option>`
+        ).join('');
+
+        // Populate Cas variant dropdown
+        const casSelect = document.getElementById('cas_variant');
+        casSelect.innerHTML = data.cas_variants.map(c =>
+            `<option value="${c.value}">${c.value} (${c.pam})</option>`
+        ).join('');
+    } catch (err) {
+        console.error('Failed to load options:', err);
+    }
+}
 
 // ===== RECENT SEARCHES =====
 function loadRecentSearches() {
@@ -798,7 +831,19 @@ async function designGuides() {
 
         if (!response.ok) {
             const err = await response.json();
-            throw new Error(err.detail || 'Design failed');
+            // Handle Pydantic validation errors (array) vs regular errors (string)
+            let errorMsg = 'Design failed';
+            if (err.detail) {
+                if (Array.isArray(err.detail)) {
+                    // Pydantic validation error - extract messages
+                    errorMsg = err.detail.map(e => e.msg || e.message || JSON.stringify(e)).join('; ');
+                } else if (typeof err.detail === 'string') {
+                    errorMsg = err.detail;
+                } else {
+                    errorMsg = JSON.stringify(err.detail);
+                }
+            }
+            throw new Error(errorMsg);
         }
 
         const data = await response.json();
@@ -1344,7 +1389,9 @@ function setExportCount(n) {
 async function exportPDF() {
     const count = parseInt(document.getElementById('exportCount').value) || 10;
     const minEff = parseInt(document.getElementById('exportMinEff').value) || 0;
-    let guides = [...currentDesignData.guides];
+    // Use allGuides to ensure we have the complete unfiltered list
+    let guides = [...(currentDesignData.allGuides || currentDesignData.guides)];
+    console.log(`Exporting PDF: Requested ${count}, Available ${guides.length}`);
     if (minEff > 0) guides = guides.filter(g => g.efficiency_score >= minEff / 100);
     guides = guides.slice(0, count);
 
@@ -1361,7 +1408,9 @@ async function exportPDF() {
 function exportCSV() {
     const count = parseInt(document.getElementById('exportCount').value) || 10;
     const minEff = parseInt(document.getElementById('exportMinEff').value) || 0;
-    let guides = [...currentDesignData.guides];
+    // Use allGuides to ensure we have the complete unfiltered list
+    let guides = [...(currentDesignData.allGuides || currentDesignData.guides)];
+    console.log(`Exporting CSV: Requested ${count}, Available ${guides.length}`);
     if (minEff > 0) guides = guides.filter(g => g.efficiency_score >= minEff / 100);
     guides = guides.slice(0, count);
 
@@ -1390,7 +1439,7 @@ th,td{border:1px solid #ccc;padding:10px;text-align:left}th{background:#f1f5f9}
 <h1>SCALPEL gRNA Report</h1>
 <p><strong>Gene:</strong> ${t.gene} | <strong>Modality:</strong> ${t.modality} | <strong>Genome:</strong> ${t.genome}</p>
 <p><strong>Coordinates:</strong> ${t.chromosome}:${t.start?.toLocaleString()}-${t.end?.toLocaleString()}</p>
-<p><strong>Total Candidates:</strong> ${currentDesignData.guides.length.toLocaleString()} | <strong>Exported:</strong> ${guides.length}</p>
+<p><strong>Total Candidates:</strong> ${(currentDesignData.allGuides || currentDesignData.guides).length.toLocaleString()} | <strong>Exported:</strong> ${guides.length}</p>
 <h2>Guides</h2>
 <table><thead><tr><th>#</th><th>Sequence</th><th>PAM</th><th>Strand</th><th>Cut Site</th><th>Efficiency</th><th>GC%</th></tr></thead>
 <tbody>${guides.map(g => `<tr><td>${g.rank}</td><td class="seq">${g.spacer_sequence}</td><td>${g.pam_sequence}</td><td>${g.strand}</td><td>${g.cut_site.toLocaleString()}</td><td>${(g.efficiency_score * 100).toFixed(0)}%</td><td>${calculateGC(g.spacer_sequence)}%</td></tr>`).join('')}</tbody></table>

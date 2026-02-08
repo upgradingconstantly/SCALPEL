@@ -26,7 +26,15 @@ class Genome(str, Enum):
     ZEBRAFISH_GRCZ11 = "GRCz11"
     # Rat
     RAT_MRATBN7 = "mRatBN7.2"
-    
+    # Drosophila (fruit fly)
+    DROSOPHILA_BDGP6 = "BDGP6"
+    # C. elegans (worm)
+    CELEGANS_WBCEL235 = "WBcel235"
+    # Pig
+    PIG_SSCROFA11 = "Sscrofa11.1"
+    # Arabidopsis (plant)
+    ARABIDOPSIS_TAIR10 = "TAIR10"
+
     @classmethod
     def from_string(cls, value: str) -> "Genome":
         """Parse genome from string, handling common aliases."""
@@ -36,6 +44,10 @@ class Genome(str, Enum):
             "mm39": cls.MOUSE_GRCM39,
             "mm10": cls.MOUSE_GRCM38,
             "danrer11": cls.ZEBRAFISH_GRCZ11,
+            "dm6": cls.DROSOPHILA_BDGP6,
+            "ce11": cls.CELEGANS_WBCEL235,
+            "susscr11": cls.PIG_SSCROFA11,
+            "tair10": cls.ARABIDOPSIS_TAIR10,
         }
         # Try direct match first
         for genome in cls:
@@ -54,7 +66,10 @@ class EditModality(str, Enum):
     ACTIVATION = "activation"          # dCas9-VP64/VPR (CRISPRa)
     BASE_EDIT_CBE = "base_edit_cbe"    # Cytosine base editor (C→T)
     BASE_EDIT_ABE = "base_edit_abe"    # Adenine base editor (A→G)
+    BASE_EDIT_GBE = "base_edit_gbe"    # Glycosylase base editor (C→G)
     PRIME_EDIT = "prime_edit"          # Prime editing
+    CRISPROFF = "crisproff"            # Epigenetic silencing (DNA methylation)
+    DUAL_NICKASE = "dual_nickase"      # Paired nickases for high specificity
 
 
 class CasVariantType(str, Enum):
@@ -62,7 +77,11 @@ class CasVariantType(str, Enum):
     SPCAS9 = "SpCas9"           # S. pyogenes Cas9 (NGG)
     SPCAS9_NG = "SpCas9-NG"     # SpCas9 variant (NG)
     SPCAS9_VQR = "SpCas9-VQR"   # SpCas9 variant (NGA)
+    SPRY = "SpRY"               # SpCas9 variant (NRN/NYN - almost PAM-less)
+    XCAS9 = "xCas9"             # Expanded PAM (NG, GAA, GAT)
     SACAS9 = "SaCas9"           # S. aureus Cas9 (NNGRRT)
+    SACAS9_KKH = "SaCas9-KKH"   # Relaxed SaCas9 (NNNRRT)
+    CJCAS9 = "CjCas9"           # C. jejuni Cas9 (NNNNRYAC) - smallest
     CAS12A = "Cas12a"           # Cpf1 (TTTV)
     CAS12A_RR = "Cas12a-RR"     # Cas12a variant (TYCV)
 

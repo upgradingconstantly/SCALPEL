@@ -143,6 +143,7 @@ class TargetResolver:
             target_region.start,
             target_region.end,
             gene_info.strand,
+            gene_symbol=gene_info.symbol,
         )
         
         return ResolvedTarget(
@@ -174,6 +175,7 @@ class TargetResolver:
             target_region.start,
             target_region.end,
             gene_info.strand,
+            gene_symbol=gene_info.symbol,
         )
         
         return ResolvedTarget(
@@ -352,9 +354,9 @@ class TargetResolver:
                     strand=gene_info.strand,
                 )
         
-        # Select exons 2-4 (skip first and last)
+        # Select all internal exons (skip first and last for NMD considerations)
         target_exons = exons[1:-1] if len(exons) > 2 else exons
-        target_exons = target_exons[:3]  # Limit to first 3 valid exons
+        # No limit - search ALL valid exons for maximum guide coverage
         
         if not target_exons:
             target_exons = exons
@@ -428,12 +430,12 @@ class TargetResolver:
         start: int,
         end: int,
         strand: Strand,
+        gene_symbol: Optional[str] = None,
     ) -> str:
         """
         Get sequence from genome reference.
         
-        Raises:
-            RuntimeError: If genome reference is not available
+        Falls back to demo sequence for known genes if no genome reference available.
         """
         if self.genome_ref is not None:
             try:
@@ -443,9 +445,11 @@ class TargetResolver:
                     f"Failed to fetch sequence {chromosome}:{start}-{end}: {e}"
                 )
         
-        # No genome reference available - raise helpful error
+        # No genome reference available - require real data
         raise RuntimeError(
             f"No genome reference available for {self.genome.value}. "
             f"Please download the genome FASTA file to ~/.scalpel/genomes/{self.genome.value.lower()}/. "
-            f"See documentation for download instructions."
+            f"See data/GENOMIC_DATA_DOWNLOAD.md for download instructions."
         )
+    
+

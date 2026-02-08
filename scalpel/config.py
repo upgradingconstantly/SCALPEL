@@ -117,21 +117,37 @@ class SCALPELConfig(BaseSettings):
         possible_names = [
             f"{genome_name}.fa",
             f"{genome_name}.fasta",
+            f"{genome_name}.fna",
             # Human genomes (Ensembl naming)
             f"Homo_sapiens.{genome_name}.dna.primary_assembly.fa",
             f"Homo_sapiens.{genome_name}.dna.primary_assembly.fasta",
             # Mouse genomes (Ensembl naming)
             f"Mus_musculus.{genome_name}.dna.primary_assembly.fa",
             f"Mus_musculus.{genome_name}.dna.primary_assembly.fasta",
+            # NCBI naming conventions
+            f"GCA_000001405.15_{genome_name}_no_alt_analysis_set.fna",
+            f"GCA_000001405.15_{genome_name}_genomic.fna",
+            f"GCF_000001405.40_{genome_name}_genomic.fna",
         ]
         
         # Check standard location
         if genome_dir.exists():
+            # First try explicit names
             for name in possible_names:
                 candidate = genome_dir / name
                 if candidate.exists():
                     fasta_path = candidate
                     break
+
+            # If still not found, search for any .fa, .fasta, or .fna file
+            if fasta_path is None:
+                for ext in ['.fa', '.fasta', '.fna']:
+                    matches = list(genome_dir.glob(f'*{ext}'))
+                    # Filter out index files
+                    matches = [m for m in matches if not str(m).endswith('.fai')]
+                    if matches:
+                        fasta_path = matches[0]
+                        break
         
         # Check project-local location if not found
         if fasta_path is None and project_genomes_dir.exists():
@@ -141,11 +157,32 @@ class SCALPELConfig(BaseSettings):
                     fasta_path = candidate
                     break
         
+        # Determine FAI path
+        fai_path = None
+        if fasta_path:
+            # Try common index naming patterns
+            for fai_candidate in [
+                fasta_path.with_suffix(fasta_path.suffix + '.fai'),  # e.g., file.fna.fai
+                Path(str(fasta_path) + '.fai'),  # e.g., file.fna.fai (alternate)
+            ]:
+                if fai_candidate.exists():
+                    fai_path = fai_candidate
+                    break
+
+        # Find annotation file (GTF/GFF)
+        annotation_path = None
+        if genome_dir.exists():
+            for pattern in ['*.gtf', '*.gff', '*.gff3']:
+                gtf_matches = list(genome_dir.glob(pattern))
+                if gtf_matches:
+                    annotation_path = gtf_matches[0]
+                    break
+
         return GenomeConfig(
             name=genome_name,
             fasta_path=fasta_path,
-            fai_path=fasta_path.with_suffix(".fa.fai") if fasta_path else None,
-            annotation_path=genome_dir / "annotations.gtf" if genome_dir.exists() else None,
+            fai_path=fai_path,
+            annotation_path=annotation_path,
             precomputed_ot_path=genome_dir / "offtargets.duckdb" if genome_dir.exists() else None,
         )
 

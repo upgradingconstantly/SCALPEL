@@ -193,6 +193,38 @@ CAS_VARIANTS: Dict[CasVariantType, PAMVariant] = {
         staggered_cut=5,
         description="Cas12a RR variant with relaxed PAM",
     ),
+    CasVariantType.SPRY: PAMVariant(
+        name="SpRY",
+        pam_sequence="NRN",  # Also accepts NYN - near PAM-less
+        pam_position=PAMPosition.THREE_PRIME,
+        spacer_length=20,
+        cut_offset_from_pam=-3,
+        description="SpCas9 variant with near-PAMless activity (NRN/NYN PAM)",
+    ),
+    CasVariantType.XCAS9: PAMVariant(
+        name="xCas9",
+        pam_sequence="NG",  # Also accepts GAA, GAT
+        pam_position=PAMPosition.THREE_PRIME,
+        spacer_length=20,
+        cut_offset_from_pam=-3,
+        description="Expanded PAM recognition (NG, GAA, GAT)",
+    ),
+    CasVariantType.SACAS9_KKH: PAMVariant(
+        name="SaCas9-KKH",
+        pam_sequence="NNNRRT",
+        pam_position=PAMPosition.THREE_PRIME,
+        spacer_length=21,
+        cut_offset_from_pam=-3,
+        description="SaCas9-KKH with relaxed PAM (NNNRRT)",
+    ),
+    CasVariantType.CJCAS9: PAMVariant(
+        name="CjCas9",
+        pam_sequence="NNNNRYAC",
+        pam_position=PAMPosition.THREE_PRIME,
+        spacer_length=22,
+        cut_offset_from_pam=-3,
+        description="C. jejuni Cas9 - smallest Cas9, good for AAV delivery",
+    ),
 }
 
 

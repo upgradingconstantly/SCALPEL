@@ -227,22 +227,19 @@ class RedFlagDetector:
         return flags
     
     def _check_genomic_context(self, spacer: SpacerCandidate) -> List[RedFlag]:
-        """Check for genomic context issues."""
+        """Check for genomic context issues.
+        
+        TODO: Integrate with RepeatMasker database for real repeat detection.
+        Required databases:
+        - RepeatMasker annotations (.out files)
+        - Segmental duplication database
+        - CNV regions from DGV
+        """
         flags = []
         
-        # Would use repeat database here
-        # For demo, we simulate based on sequence patterns
-        seq = spacer.spacer_sequence.upper()
-        
-        # Simple repeat check (AT-rich regions often in Alu elements)
-        at_content = (seq.count("A") + seq.count("T")) / len(seq)
-        if at_content > 0.7 and "AAAA" in seq:
-            flags.append(RedFlag(
-                flag_type=RedFlagType.REPEAT_ELEMENT.value,
-                severity=RedFlagSeverity.LOW,
-                message="Guide may overlap with repeat element (high AT content)",
-                details={"at_content": at_content},
-            ))
+        # Repeat element check requires RepeatMasker database
+        # Currently returns empty - no false positives from simulation
+        # To enable: download RepeatMasker annotations and implement lookup
         
         return flags
     

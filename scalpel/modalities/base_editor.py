@@ -227,3 +227,30 @@ class ABEDesigner(BaseEditorDesigner):
     
     def __init__(self):
         super().__init__(editor_type="ABE")
+
+
+@register_modality(EditModality.BASE_EDIT_GBE)
+class GBEDesigner(BaseEditorDesigner):
+    """
+    Glycosylase Base Editor (C→G) designer.
+    
+    Uses UNG-nCas9-rAPOBEC fusion for C→G transversion.
+    Similar window to CBE (positions 4-8) but different outcome.
+    """
+    
+    def __init__(self):
+        super().__init__(editor_type="GBE")
+        # Override for GBE specifics
+        self.target_base = "C"
+        self.product_base = "G"  # C→G instead of C→T
+        self.editing_window = (4, 8)
+        self.window_weights = {4: 0.5, 5: 0.8, 6: 1.0, 7: 0.8, 8: 0.4}
+    
+    @property
+    def display_name(self) -> str:
+        return "Base Editor (GBE)"
+    
+    @property
+    def description(self) -> str:
+        return "Design guides for C→G base transversion"
+
