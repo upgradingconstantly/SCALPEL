@@ -274,6 +274,12 @@ class OffTargetAnalysis(BaseModel):
     # Analysis metadata
     max_mismatches: int = 4
     genome: Genome = Genome.HUMAN_GRCH38
+    
+    # Backend metadata (B1.2)
+    backend: str = "duckdb"  # "duckdb", "memory", "none"
+    db_path: Optional[str] = None  # Path to database used
+    candidate_count: int = 0  # Raw candidates before filtering
+    search_ms: float = 0.0  # Search time in milliseconds
 
 
 # =============================================================================

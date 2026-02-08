@@ -72,11 +72,17 @@ class OffTargetSearcher:
         Returns:
             OffTargetAnalysis with all identified sites
         """
+        import time
+        start_time = time.perf_counter()
+        
         spacer = spacer.upper()
+        candidate_count = 0
+        backend = "none"
         
         # Try database search first
         if self.use_database:
-            hits = self._search_database(spacer, include_pam_variants=include_pam_variants)
+            hits, candidate_count = self._search_database_with_count(spacer, include_pam_variants=include_pam_variants)
+            backend = "duckdb"
         else:
             hits = []
         
@@ -111,6 +117,9 @@ class OffTargetSearcher:
         # Calculate risk distribution
         risk_dist = self._calculate_risk_distribution(sites)
         
+        # Calculate search time
+        search_ms = (time.perf_counter() - start_time) * 1000
+        
         return OffTargetAnalysis(
             on_target_spacer=spacer,
             sites=sites,
@@ -120,6 +129,11 @@ class OffTargetSearcher:
             risk_distribution=risk_dist,
             max_mismatches=self.max_mismatches,
             genome=self.genome,
+            # Backend metadata (B1.2)
+            backend=backend,
+            db_path=str(self._db_path) if self._db_path else None,
+            candidate_count=candidate_count,
+            search_ms=round(search_ms, 2),
         )
     
     def _search_database(
@@ -210,7 +224,15 @@ class OffTargetSearcher:
 
         # Lowest mismatch count first before downstream risk sort.
         hits.sort(key=lambda h: h.mismatch_count)
-        return hits
+        return hits, len(raw_candidates)
+    
+    def _search_database_with_count(
+        self,
+        spacer: str,
+        include_pam_variants: bool = True,
+    ) -> Tuple[List[OffTargetHit], int]:
+        """Search database and return (hits, candidate_count) for metadata."""
+        return self._search_database(spacer, include_pam_variants)
 
     def _resolve_database_path(self) -> Optional[Path]:
         """Resolve off-target DB path with explicit precedence."""
